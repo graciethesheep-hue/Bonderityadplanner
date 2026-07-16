@@ -2,7 +2,7 @@
 <html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <!-- iOS PWA: status bar blends with the app header; safe-areas handled in CSS -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -19,6 +19,12 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
+    /* v32: native-app feel — taps and scrolls only. touch-action:manipulation
+       kills double-tap zoom; the viewport meta blocks pinch zoom. */
+    html {
+      touch-action: manipulation;
+    }
+
     /* ============================================================
        DESIGN TOKENS — All visual decisions live here
        ============================================================ */
@@ -2098,17 +2104,14 @@
     .task-due.overdue { color: var(--accent-danger); font-weight: 600; }
     .task-due.today   { color: var(--accent-warm); font-weight: 600; }
 
+    /* v31: task actions are ALWAYS visible — hover-reveal hid Edit/Delete on
+       touch devices and made them hard to discover everywhere else. */
     .task-actions {
       display: flex;
       gap: var(--space-1);
-      opacity: 0;
-      transition: opacity var(--transition-fast);
+      opacity: 1;
     }
 
-    .task-card:hover .task-actions { opacity: 1; }
-
-    /* Pause/Edit/Delete are the only controls on a recurring card — never hide them
-       behind hover (touch devices have no hover at all). */
     .task-actions.always-visible { opacity: 1; }
 
     /* Priority Matrix */
@@ -3598,7 +3601,10 @@
           <div class="card" id="incomeCard">
             <div class="card-header">
               <div class="card-title">💵 Income <span class="badge badge-warning hidden" id="incomePastBadge" style="font-size:9px;">PAST MONTH</span></div>
-              <button class="btn btn-secondary btn-sm" onclick="Budget.openAddIncome()">+ Add</button>
+              <div style="display:flex;gap:var(--space-2);">
+                <button class="btn btn-ghost btn-sm" onclick="Budget.openIncomeSources()" title="View and edit the recurring income rules">📄 Sources</button>
+                <button class="btn btn-secondary btn-sm" onclick="Budget.openAddIncome()">+ Add</button>
+              </div>
             </div>
             <div id="incomeList">
               <div class="empty-state" style="padding: var(--space-8);">
@@ -3613,7 +3619,10 @@
           <div class="card" id="billsCard">
             <div class="card-header">
               <div class="card-title">📋 Monthly Bills <span class="badge badge-warning hidden" id="billsPastBadge" style="font-size:9px;">PAST MONTH</span></div>
-              <button class="btn btn-secondary btn-sm" onclick="Budget.openAddBill()">+ Add</button>
+              <div style="display:flex;gap:var(--space-2);">
+                <button class="btn btn-ghost btn-sm" onclick="Budget.openBillTemplates()" title="View and edit the recurring bill rules">📄 Templates</button>
+                <button class="btn btn-secondary btn-sm" onclick="Budget.openAddBill()">+ Add</button>
+              </div>
             </div>
             <div id="billsList">
               <div class="empty-state" style="padding: var(--space-8);">
@@ -5826,6 +5835,7 @@ const Tasks = (() => {
     saveState();
     renderList();
     renderStatusChart();
+    if (viewMode === 'matrix') renderMatrix(); // v31: matrix updates instantly too
     return task;
   }
 
@@ -5836,6 +5846,7 @@ const Tasks = (() => {
     saveState();
     renderList();
     renderStatusChart();
+    if (viewMode === 'matrix') renderMatrix();
   }
 
   async function deleteTask(id) {
@@ -5851,6 +5862,7 @@ const Tasks = (() => {
     saveState();
     renderList();
     renderStatusChart();
+    if (viewMode === 'matrix') renderMatrix();
     Dashboard.renderTop3();
     Toast.show('Task deleted', 'info');
   }
@@ -7799,8 +7811,29 @@ const Budget = (() => {
     if (!AppState.budget.payConfs) AppState.budget.payConfs = {}; // '<incomeId>|<paydayISO>' → true | 'skipped' | 'declined'
     if (!AppState.budget.viewStates) AppState.budget.viewStates = { income:'thisMonth', bills:'thisMonth', expenses:'thisMonth' };
     if (!AppState.budget.viewStates.globalFilter) AppState.budget.viewStates.globalFilter = 'all';
+    // v31: per-INSTANCE edits of expected entries — never touch the master rule
+    if (!AppState.budget.payOverrides)  AppState.budget.payOverrides  = {}; // 'incomeId|payday' → {amount, date}
+    if (!AppState.budget.billOverrides) AppState.budget.billOverrides = {}; // 'billId|YYYY-MM'  → {amount, dueDay}
     _ensureIncomeHistory();
     _ensureBillHistory();
+  }
+
+  // Effective values for ONE instance (override → falls back to the template)
+  function _incAmountFor(i, payday) {
+    const ov = AppState.budget.payOverrides[`${i.id}|${payday}`];
+    return ov && ov.amount != null ? (parseFloat(ov.amount) || 0) : (parseFloat(i.amount) || 0);
+  }
+  function _incDateFor(i, payday) {
+    const ov = AppState.budget.payOverrides[`${i.id}|${payday}`];
+    return (ov && ov.date) || payday;
+  }
+  function _billAmountFor(b, m) {
+    const ov = AppState.budget.billOverrides[`${b.id}|${m}`];
+    return ov && ov.amount != null ? (parseFloat(ov.amount) || 0) : (parseFloat(b.amount) || 0);
+  }
+  function _billDueDayFor(b, m) {
+    const ov = AppState.budget.billOverrides[`${b.id}|${m}`];
+    return (ov && ov.dueDay) || b.dueDay || 1;
   }
 
   // v30: paid bills become PERMANENT records too (like income). Backfilled once
@@ -7966,7 +7999,7 @@ const Budget = (() => {
     // Committed total = live templates + paid records whose template is gone
     const orphanPaid = monthRecs.filter(r => !monthBills.some(b => b.id === r.billId))
       .reduce((s, r) => s + (parseFloat(r.amount)||0), 0);
-    const bills = monthBills.reduce((s, b) => s + (parseFloat(b.amount)||0), 0) + orphanPaid;
+    const bills = monthBills.reduce((s, b) => s + _billAmountFor(b, thisMonth), 0) + orphanPaid;
     // "Spent" is everyday (non-bill) spending — bill payments are excluded
     const spent = AppState.budget.expenses
       .filter(e => e.date && e.date.startsWith(thisMonth) && !e.autoBillId)
@@ -8669,10 +8702,13 @@ const Budget = (() => {
     }
     AppState.budget.payConfs[`${id}|${payday}`] = true;
     // Permanent record — this is what totals/exports read from now on (v29)
-    if (!(AppState.budget.incomeHistory || []).some(r => r.incomeId === id && r.date === payday)) {
+    if (!(AppState.budget.incomeHistory || []).some(r => r.incomeId === id && (r.payday || r.date) === payday)) {
       const src = AppState.budget.income.find(x => x.id === id);
+      // Instance override (v31) wins over the template amount/date
       AppState.budget.incomeHistory.push({ id:Helpers.uuid(), incomeId:id, name:src?.name || 'Income',
-        amount:parseFloat(src?.amount)||0, date:payday, notes:'', createdAt:new Date().toISOString() });
+        amount: src ? _incAmountFor(src, payday) : 0,
+        date: src ? _incDateFor(src, payday) : payday,
+        payday, notes:'', createdAt:new Date().toISOString() });
     }
     // Track carry-forward: any unspent from previous month adds to safe-to-spend
     _carryForward(m);
@@ -8737,6 +8773,41 @@ const Budget = (() => {
       document.getElementById(id)?.classList.toggle('hidden', !past));
   }
 
+  // ── v31: "Sources / Templates" modals — the ONLY place master rules are edited ──
+  function openIncomeSources() {
+    _ensureConfs();
+    const rows = (AppState.budget.income || []).map(i => `<div class="bill-row">
+        <div><div class="bill-row-name">${escHtml(i.name)}${i.notes ? ' 📝' : ''}</div>
+          <div class="bill-row-due">${_freqLabel(i.frequency)}${i.firstPayday ? ' · from ' + Helpers.formatDateShort(i.firstPayday) : ''}</div></div>
+        <div style="display:flex;align-items:center;gap:var(--space-2);">
+          <span class="bill-row-amt" style="color:var(--accent-success);">+${Helpers.currency(i.amount)}</span>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditIncome('${i.id}')" title="Edit this master rule">✏️</button>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteIncome('${i.id}'); Budget.openIncomeSources();" title="Delete source (received history is kept)">🗑️</button>
+        </div></div>`).join('');
+    Modal.open({ title: '📄 Income Sources — master rules', body: `
+      <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--space-3);">These recurring rules generate the expected paydays on your timeline. Editing here changes future months — payments you already received stay exactly as recorded.</div>
+      ${rows || '<div style="color:var(--text-muted);font-size:var(--text-sm);text-align:center;padding:var(--space-4) 0;">No income sources yet.</div>'}`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Close</button>
+               <button class="btn btn-primary" onclick="Budget.openAddIncome()">+ Add Income</button>` });
+  }
+
+  function openBillTemplates() {
+    _ensureConfs();
+    const rows = (AppState.budget.bills || []).map(b => `<div class="bill-row">
+        <div><div class="bill-row-name">${escHtml(b.name)}${b.notes ? ' 📝' : ''}</div>
+          <div class="bill-row-due">${b.oneTime ? `⚡ One-time (${b.month})` : `Monthly · due day ${b.dueDay}`}</div></div>
+        <div style="display:flex;align-items:center;gap:var(--space-2);">
+          <span class="bill-row-amt">${Helpers.currency(b.amount)}</span>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditBill('${b.id}')" title="Edit this master rule">✏️</button>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteBill('${b.id}'); Budget.openBillTemplates();" title="Delete bill (paid history is kept)">🗑️</button>
+        </div></div>`).join('');
+    Modal.open({ title: '📄 Bill Templates — master rules', body: `
+      <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--space-3);">These rules generate the bills due each month. Editing here changes future months — payments you already made stay exactly as recorded.</div>
+      ${rows || '<div style="color:var(--text-muted);font-size:var(--text-sm);text-align:center;padding:var(--space-4) 0;">No bills yet.</div>'}`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Close</button>
+               <button class="btn btn-primary" onclick="Budget.openAddBill()">+ Add Bill</button>` });
+  }
+
   // v29: one-time bills exist only in the month they were created for
   function _billActiveInMonth(b, key) {
     if (b.createdAt && b.createdAt.slice(0, 7) > key) return false;
@@ -8784,6 +8855,14 @@ const Budget = (() => {
       <div style="flex:1;height:1px;background:var(--border);"></div>
     </div>`;
 
+  // v31 unified timeline card: tinted background + thick colored left border
+  const _tlStyle = (hex) =>
+    `border-left:4px solid ${hex};background:${hex}14;border-radius:var(--radius-sm);padding:var(--space-2) var(--space-2) var(--space-2) var(--space-3);margin-bottom:var(--space-2);`;
+
+  // v31 styled card-summary header (the "$X confirmed received" line)
+  const _cardSummary = (html) =>
+    `<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3);margin-bottom:var(--space-3);text-align:center;font-size:var(--text-xs);color:var(--text-muted);">${html}</div>`;
+
   function renderIncome() {
     const container = document.getElementById('incomeList');
     if (!container) return;
@@ -8810,38 +8889,35 @@ const Budget = (() => {
     pending.sort((a, b) => a.p.localeCompare(b.p));
     const received = (AppState.budget.incomeHistory || []).filter(r => r.date && r.date.startsWith(m))
       .sort((a, b) => b.date.localeCompare(a.date));
-    const header = `<div style="text-align:center;font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--space-3);">
-      <strong style="color:var(--text-primary);font-size:var(--text-sm);">${Helpers.currency(_confirmedIncomeForMonth(m))}</strong> confirmed received${pending.length ? ` · ${pending.length} expected` : ''}</div>`;
-    const pendingRows = pending.map(({ i, p, arrived }) => `
-      <div class="bill-row" style="${arrived ? 'border-left:4px solid var(--accent-warm);background:rgba(245,158,11,0.08);border-radius:var(--radius-sm);padding-left:var(--space-2);' : ''}">
+    const header = _cardSummary(`<strong style="color:var(--text-primary);font-size:var(--text-sm);">${Helpers.currency(_confirmedIncomeForMonth(m))}</strong> confirmed received${pending.length ? ` · ${pending.length} expected` : ''}`);
+    // v31: ✏️ edits THAT instance only; 🗑 skips THAT payday only. Master rules live in 📄 Sources.
+    const pendingRows = pending.map(({ i, p, arrived }) => {
+      const edited = !!AppState.budget.payOverrides[`${i.id}|${p}`];
+      return `
+      <div class="bill-row" style="${_tlStyle(arrived ? '#F59E0B' : '#9CA3AF')}">
         <div style="cursor:pointer;" onclick="Budget.viewEntry('income','${i.id}')" title="Tap for details">
-          <div class="bill-row-name">${escHtml(i.name)}${i.notes ? ' 📝' : ''}</div>
-          <div class="bill-row-due">${arrived ? '⏳ Expected ' : '📅 Expected '}${Helpers.formatDateShort(p)} · ${_freqLabel(i.frequency)}</div></div>
+          <div class="bill-row-name">${escHtml(i.name)}${i.notes ? ' 📝' : ''}${edited ? ' <span class="badge badge-neutral" style="font-size:9px;">edited</span>' : ''}</div>
+          <div class="bill-row-due">${arrived ? '⏳ Expected ' : '📅 Expected '}${Helpers.formatDateShort(_incDateFor(i, p))} · ${_freqLabel(i.frequency)}</div></div>
         <div style="display:flex;align-items:center;gap:var(--space-2);">
-          <span class="bill-row-amt" style="color:var(--accent-success);">+${Helpers.currency(i.amount)}</span>
+          <span class="bill-row-amt" style="color:var(--accent-success);">+${Helpers.currency(_incAmountFor(i, p))}</span>
           ${arrived ? `<button class="btn btn-primary btn-sm" onclick="Budget.confirmIncome('${i.id}','${p}')" title="Mark this payday as received">✓ Got it</button>` : '<span class="badge badge-neutral">Not yet due</span>'}
-          ${isCur ? `<button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditIncome('${i.id}')" title="Edit income source">✏️</button>
-          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteIncome('${i.id}')" title="Delete income source (history is kept)">🗑️</button>` : ''}
-        </div></div>`).join('');
-    const receivedRows = received.map(r => `<div class="expense-row" style="opacity:0.9;">
-        <div class="expense-cat-dot" style="background:var(--accent-success);"></div>
-        <div><div class="expense-desc">${escHtml(r.name)}</div>
-          <div class="expense-date">✅ Received ${Helpers.formatDateShort(r.date)}</div></div>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditExpectedIncome('${i.id}','${p}')" title="Edit THIS payment only">✏️</button>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.declineIncome('${i.id}','${p}')" title="Skip THIS payday only (won't count, won't be asked)">🗑️</button>
+        </div></div>`;
+    }).join('');
+    const receivedRows = received.map(r => `<div class="bill-row" style="${_tlStyle('#10B981')}">
+        <div><div class="bill-row-name">${escHtml(r.name)}</div>
+          <div class="bill-row-due">✅ Received ${Helpers.formatDateShort(r.date)}${r.notes ? ' 📝' : ''}</div></div>
         <div style="display:flex;align-items:center;gap:var(--space-2);">
-          <span class="expense-amt" style="color:var(--accent-success);">+${Helpers.currency(r.amount)}</span>
+          <span class="bill-row-amt" style="color:var(--accent-success);">+${Helpers.currency(r.amount)}</span>
           <button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditIncomeRecord('${r.id}')" title="Edit this received payment">✏️</button>
-          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteIncomeRecord('${r.id}')" title="Remove this received payment">🗑️</button>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.unconfirmIncomeRecord('${r.id}')" title="Unconfirm — back to Expected">↩</button>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteIncomeRecord('${r.id}')" title="Remove — this payday won't count at all">🗑️</button>
         </div></div>`).join('');
-    // Sources with no pending row this month still need an edit affordance
-    const idle = isCur ? AppState.budget.income.filter(i => !pending.some(x => x.i.id === i.id)) : [];
-    const idleRow = idle.length ? `<div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:var(--space-3);display:flex;flex-wrap:wrap;gap:6px;align-items:center;">📄 Sources:
-        ${idle.map(i => `<span style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-full);padding:2px 4px 2px 10px;white-space:nowrap;">${escHtml(i.name)} · ${_freqLabel(i.frequency)}
-          <button class="btn btn-ghost btn-icon-sm" style="min-width:auto;min-height:auto;padding:0 4px;" onclick="Budget.openEditIncome('${i.id}')" title="Edit">✏️</button><button class="btn btn-ghost btn-icon-sm" style="min-width:auto;min-height:auto;padding:0 4px;" onclick="Budget.deleteIncome('${i.id}')" title="Delete (history is kept)">🗑️</button></span>`).join('')}
-      </div>` : '';
     container.innerHTML = header
-      + (pendingRows || `<div style="color:var(--text-muted);font-size:var(--text-sm);text-align:center;padding:var(--space-2) 0;">Nothing waiting on you 🎉</div>`)
-      + (received.length ? _doneDivider('✅ Received') + receivedRows : '')
-      + idleRow;
+      + (pending.length ? _doneDivider('⏳ Expected') + pendingRows
+        : `<div style="color:var(--text-muted);font-size:var(--text-sm);text-align:center;padding:var(--space-2) 0;">Nothing waiting on you 🎉</div>`)
+      + (received.length ? _doneDivider('✅ Received') + receivedRows : '');
   }
 
   // ── v30 MERGED TIMELINE (Bills): unpaid/unanswered bills needing action on
@@ -8866,18 +8942,18 @@ const Budget = (() => {
     }
     // Pending = active bills without a paid record this month (incl. 'notpaid')
     const pending = active.filter(b => !_billRecordFor(b.id, m) && (b.paidMonths || {})[m] !== true)
-      .sort((a, b) => (a.dueDay || 1) - (b.dueDay || 1));
+      .sort((a, b) => _billDueDayFor(a, m) - _billDueDayFor(b, m));
     const paidTotal = paidRecs.reduce((s, r) => s + (parseFloat(r.amount)||0), 0);
-    const header = `<div style="text-align:center;font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--space-3);">
-      <strong style="color:var(--text-primary);font-size:var(--text-sm);">${Helpers.currency(paidTotal)}</strong> paid${pending.length ? ` · ${pending.length} still open` : ''}</div>`;
+    const header = _cardSummary(`<strong style="color:var(--text-primary);font-size:var(--text-sm);">${Helpers.currency(paidTotal)}</strong> paid${pending.length ? ` · ${pending.length} still open` : ''}`);
+    // v31: ✏️ edits THIS month's instance only. Master rules live in 📄 Templates.
     const pendingRows = pending.map(b => {
+      const dueDay = _billDueDayFor(b, m);
+      const edited = !!AppState.budget.billOverrides[`${b.id}|${m}`];
       const notPaid = (b.paidMonths || {})[m] === 'notpaid';
-      const overdueDays = isCur && !notPaid && b.dueDay < tod ? tod - b.dueDay : 0;
-      const daysLeft    = isCur && !notPaid && b.dueDay >= tod ? b.dueDay - tod : -1;
+      const overdueDays = isCur && !notPaid && dueDay < tod ? tod - dueDay : 0;
+      const daysLeft    = isCur && !notPaid && dueDay >= tod ? dueDay - tod : -1;
       const urgent      = isCur && !notPaid && daysLeft >= 0 && daysLeft <= 5;
-      const rowStyle = overdueDays ? 'border-left:4px solid var(--accent-danger);background:rgba(239,68,68,0.07);border-radius:var(--radius-sm);padding-left:var(--space-2);'
-        : urgent ? 'border-left:4px solid var(--accent-warm);background:rgba(245,158,11,0.08);border-radius:var(--radius-sm);padding-left:var(--space-2);'
-        : '';
+      const rowStyle = _tlStyle(overdueDays ? '#EF4444' : urgent ? '#F59E0B' : '#9CA3AF');
       const chip = notPaid ? '<span class="badge badge-danger">✖ Not paid</span>'
         : !isCur ? '<span class="badge badge-neutral">Unanswered</span>'
         : overdueDays ? `<span class="badge badge-danger">⚠️ ${overdueDays} day${overdueDays===1?'':'s'} overdue</span>`
@@ -8885,27 +8961,26 @@ const Budget = (() => {
         : `<span class="badge badge-neutral">${daysLeft}d</span>`;
       return `<div class="bill-row" style="${rowStyle}">
         <div style="cursor:pointer;" onclick="Budget.viewEntry('bill','${b.id}')" title="Tap for details">
-          <div class="bill-row-name">${escHtml(b.name)}${b.notes ? ' 📝' : ''}</div>
-          <div class="bill-row-due">${b.oneTime ? '⚡ One-time · ' : ''}Due day ${b.dueDay}</div></div>
+          <div class="bill-row-name">${escHtml(b.name)}${b.notes ? ' 📝' : ''}${edited ? ' <span class="badge badge-neutral" style="font-size:9px;">edited</span>' : ''}</div>
+          <div class="bill-row-due">${b.oneTime ? '⚡ One-time · ' : ''}Due day ${dueDay}</div></div>
         <div style="display:flex;align-items:center;gap:var(--space-2);">
           ${chip}
-          <span class="bill-row-amt">${Helpers.currency(b.amount)}</span>
+          <span class="bill-row-amt">${Helpers.currency(_billAmountFor(b, m))}</span>
           ${!notPaid ? `<button class="btn btn-primary btn-sm" onclick="Budget.${isCur ? `toggleBillPaid('${b.id}')` : `markBillMonth('${b.id}','${m}',true)`}" title="Mark as paid">✓ Paid</button>` : ''}
-          ${isCur ? `<button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditBill('${b.id}')" title="Edit bill">✏️</button>
-          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteBill('${b.id}')" title="Delete bill (paid history is kept)">🗑️</button>` : ''}
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditExpectedBill('${b.id}','${m}')" title="Edit THIS month's instance only">✏️</button>
         </div></div>`;
     }).join('');
-    const paidRows = paidRecs.map(r => `<div class="expense-row" style="opacity:0.9;">
-        <div class="expense-cat-dot" style="background:var(--accent-primary);"></div>
-        <div><div class="expense-desc">${escHtml(r.name)}</div>
-          <div class="expense-date">✅ Paid ${Helpers.formatDateShort(r.date)}${r.notes ? ' 📝' : ''}</div></div>
+    const paidRows = paidRecs.map(r => `<div class="bill-row" style="${_tlStyle('#10B981')}">
+        <div><div class="bill-row-name">${escHtml(r.name)}</div>
+          <div class="bill-row-due">✅ Paid ${Helpers.formatDateShort(r.date)}${r.notes ? ' 📝' : ''}</div></div>
         <div style="display:flex;align-items:center;gap:var(--space-2);">
-          <span class="expense-amt">${Helpers.currency(r.amount)}</span>
+          <span class="bill-row-amt">${Helpers.currency(r.amount)}</span>
           <button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditBillRecord('${r.id}')" title="Edit this payment record">✏️</button>
-          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteBillRecord('${r.id}')" title="Remove this payment record">🗑️</button>
+          <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteBillRecord('${r.id}')" title="Unconfirm — back to unpaid">↩</button>
         </div></div>`).join('');
     container.innerHTML = header
-      + (pendingRows || `<div style="color:var(--text-muted);font-size:var(--text-sm);text-align:center;padding:var(--space-2) 0;">All bills handled 🎉</div>`)
+      + (pending.length ? _doneDivider('⏳ Unpaid') + pendingRows
+        : `<div style="color:var(--text-muted);font-size:var(--text-sm);text-align:center;padding:var(--space-2) 0;">All bills handled 🎉</div>`)
       + (paidRecs.length ? _doneDivider('✅ Paid') + paidRows : '');
   }
 
@@ -8944,7 +9019,7 @@ const Budget = (() => {
     if (paid && !(AppState.budget.expenses || []).some(e => e.autoBillId === id && e.autoBillMonth === mKey)) {
       // Log the payment in ITS month so history and exports stay accurate
       const day = Math.min(b.dueDay || 1, new Date(parseInt(mKey.slice(0, 4)), parseInt(mKey.slice(5, 7)), 0).getDate());
-      const exp = { id:Helpers.uuid(), date:`${mKey}-${String(day).padStart(2, '0')}`, amount:parseFloat(b.amount)||0,
+      const exp = { id:Helpers.uuid(), date:`${mKey}-${String(day).padStart(2, '0')}`, amount:_billAmountFor(b, mKey),
         description:`Bill — ${b.name}`, category:'Bills', autoBillId:b.id, autoBillMonth:mKey, createdAt:new Date().toISOString() };
       AppState.budget.expenses.unshift(exp);
       // v30: permanent bill record — survives template deletion
@@ -8982,7 +9057,7 @@ const Budget = (() => {
     b.paidMonths[m] = b.paidMonths[m] === true ? false : true;
     if (b.paidMonths[m] === true) {
       // Paid: the committed bill becomes a real expense (Bills → Spent)
-      const exp = { id:Helpers.uuid(), date:Helpers.today(), amount:parseFloat(b.amount)||0,
+      const exp = { id:Helpers.uuid(), date:Helpers.today(), amount:_billAmountFor(b, m),
         description:`Bill — ${b.name}`, category:'Bills', autoBillId:b.id, autoBillMonth:m, createdAt:new Date().toISOString() };
       AppState.budget.expenses.unshift(exp);
       // v30: permanent bill record — survives template deletion
@@ -9028,14 +9103,14 @@ const Budget = (() => {
   }
 
   function _expenseRow(e) {
+    // v31 unified card design — tint + left border follow the category's chart color
     const color = CONFIG.expenseCategoryColors[e.category] || '#9CA3AF';
-    return `<div class="expense-row">
-      <div class="expense-cat-dot" style="background:${color};"></div>
+    return `<div class="bill-row" style="${_tlStyle(color)}">
       <div style="cursor:pointer;" onclick="Budget.viewEntry('expense','${e.id}')" title="Tap for details">
-        <div class="expense-desc">${escHtml(e.description || e.category)}${e.notes ? ' 📝' : ''}</div>
-        <div class="expense-date">${Helpers.formatDateShort(e.date)} · ${e.category}</div></div>
+        <div class="bill-row-name">${escHtml(e.description || e.category)}${e.notes ? ' 📝' : ''}</div>
+        <div class="bill-row-due">${Helpers.formatDateShort(e.date)} · ${e.category}</div></div>
       <div style="display:flex;align-items:center;gap:var(--space-2);">
-        <span class="expense-amt">${Helpers.currency(e.amount)}</span>
+        <span class="bill-row-amt">${Helpers.currency(e.amount)}</span>
         <button class="btn btn-ghost btn-icon-sm" onclick="Budget.openEditExpense('${e.id}')" title="Edit">✏️</button>
         <button class="btn btn-ghost btn-icon-sm" onclick="Budget.deleteExpense('${e.id}')">🗑️</button>
       </div></div>`;
@@ -9071,9 +9146,8 @@ const Budget = (() => {
           : `${Helpers.currency(limit - monthTotal)} left before your limit`}</div>
       </div>`;
     }
-    const nav = `<div style="text-align:center;font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--space-3);">
-        <strong style="color:var(--text-primary);font-size:var(--text-sm);">${Helpers.currency(monthTotal)}</strong> spent (bills not included)</div>
-      ${limitBar}`;
+    const nav = _cardSummary(`<strong style="color:var(--text-primary);font-size:var(--text-sm);">${Helpers.currency(monthTotal)}</strong> spent (bills not included)`)
+      + limitBar;
     if (!list.length) {
       container.innerHTML = nav + `<div class="empty-state" style="padding:var(--space-6);">
         <div class="empty-state-icon">🧾</div>
@@ -9266,6 +9340,68 @@ const Budget = (() => {
     saveState(); refresh();
     Toast.show('Paid-bill record removed — the bill is back to unanswered for that month', 'info');
     if (r.month < Helpers.today().slice(0, 7)) _recalcCarryOverAfterRetro('removed a paid bill');
+  }
+
+  // ── v31: edit ONE expected instance (never the master rule) ──────
+  function openEditExpectedIncome(incomeId, payday) {
+    const i = (AppState.budget.income || []).find(x => x.id === incomeId);
+    if (!i) return;
+    Modal.open({ title: '✏️ Edit This Expected Payment', body: `
+      <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--space-3);">This changes ONLY the ${Helpers.formatDateShort(payday)} payment of "${escHtml(i.name)}" — the recurring rule in 📄 Sources is untouched.</div>
+      <div class="grid-2">
+        <div class="form-group"><label class="form-label">Amount this time *</label>
+          <input class="input" type="number" id="xiAmount" value="${_incAmountFor(i, payday)}" min="0" step="0.01" /></div>
+        <div class="form-group"><label class="form-label">Expected date</label>
+          <input class="input" type="date" id="xiDate" value="${_incDateFor(i, payday)}" /></div>
+      </div>`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
+               <button class="btn btn-primary" onclick="Budget.submitEditExpectedIncome('${incomeId}','${payday}')">✓ Save</button>` });
+  }
+
+  function submitEditExpectedIncome(incomeId, payday) {
+    const amt = parseFloat(document.getElementById('xiAmount')?.value);
+    const date = document.getElementById('xiDate')?.value;
+    if (!amt || amt <= 0) { Toast.show('Please enter a valid amount', 'warning'); return; }
+    AppState.budget.payOverrides[`${incomeId}|${payday}`] = { amount: amt, date: date || payday };
+    saveState(); Modal.close(); refresh();
+    Toast.show('This payment updated — the recurring rule is unchanged ✅', 'success');
+  }
+
+  function openEditExpectedBill(billId, m) {
+    const b = (AppState.budget.bills || []).find(x => x.id === billId);
+    if (!b) return;
+    const label = new Date(m + '-01T12:00:00').toLocaleDateString('en-US', { month:'long', year:'numeric' });
+    Modal.open({ title: '✏️ Edit This Bill Instance', body: `
+      <div style="font-size:var(--text-xs);color:var(--text-muted);margin-bottom:var(--space-3);">This changes ONLY "${escHtml(b.name)}" for ${label} — the recurring rule in 📄 Templates is untouched.</div>
+      <div class="grid-2">
+        <div class="form-group"><label class="form-label">Amount this month *</label>
+          <input class="input" type="number" id="xbAmount" value="${_billAmountFor(b, m)}" min="0" step="0.01" /></div>
+        <div class="form-group"><label class="form-label">Due day this month</label>
+          <input class="input" type="number" id="xbDay" value="${_billDueDayFor(b, m)}" min="1" max="31" /></div>
+      </div>`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
+               <button class="btn btn-primary" onclick="Budget.submitEditExpectedBill('${billId}','${m}')">✓ Save</button>` });
+  }
+
+  function submitEditExpectedBill(billId, m) {
+    const amt = parseFloat(document.getElementById('xbAmount')?.value);
+    const day = Math.min(31, Math.max(1, parseInt(document.getElementById('xbDay')?.value) || 1));
+    if (!amt || amt <= 0) { Toast.show('Please enter a valid amount', 'warning'); return; }
+    AppState.budget.billOverrides[`${billId}|${m}`] = { amount: amt, dueDay: day };
+    saveState(); Modal.close(); refresh();
+    Toast.show('This bill instance updated — the recurring rule is unchanged ✅', 'success');
+  }
+
+  // ── v31: Unconfirm — put a received payment back into "Expected" ──────
+  function unconfirmIncomeRecord(id) {
+    const r = (AppState.budget.incomeHistory || []).find(x => x.id === id);
+    if (!r) return;
+    AppState.budget.incomeHistory = AppState.budget.incomeHistory.filter(x => x.id !== id);
+    // Reopen the payday question (undefined = pending again, not declined)
+    delete AppState.budget.payConfs[`${r.incomeId}|${r.payday || r.date}`];
+    saveState(); refresh();
+    Toast.show('↩ Unconfirmed — back to Expected. Safe-to-Spend updated.', 'info');
+    if (r.date.slice(0, 7) < Helpers.today().slice(0, 7)) _recalcCarryOverAfterRetro('unconfirmed an income');
   }
 
   function openAddBill() {
@@ -9545,6 +9681,8 @@ const Budget = (() => {
            viewEntry, carryDecide,
            globalPrevMonth, globalNextMonth, globalReturnToCurrent, setGlobalFilter,
            openEditBillRecord, submitEditBillRecord, deleteBillRecord,
+           openIncomeSources, openBillTemplates, unconfirmIncomeRecord,
+           openEditExpectedIncome, submitEditExpectedIncome, openEditExpectedBill, submitEditExpectedBill,
            openSpendLimit, submitSpendLimit,
            recheckImpulse, deleteImpulseLog,
            getTotals: calcTotals };

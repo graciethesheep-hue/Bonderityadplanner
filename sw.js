@@ -1,7 +1,7 @@
 /* ADHD Life Planner — service worker
    Cache-first offline support for the app shell + CDN assets (Chart.js, fonts).
    Bump CACHE_VERSION whenever a new app version is deployed so clients update. */
-const CACHE_VERSION = 'adhd-planner-v30';
+const CACHE_VERSION = 'adhd-planner-v32';
 const SHELL = [
   './',
   './index.html',
