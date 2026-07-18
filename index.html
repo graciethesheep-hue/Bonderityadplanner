@@ -3785,12 +3785,11 @@
           <h1 class="section-title">Fitness</h1>
           <p class="section-subtitle">Log workouts, track body metrics, see progress.</p>
         </div>
-        <div class="section-actions">
-          <button id="fitnessViewType"   data-mode="type"   class="btn btn-primary btn-sm"   onclick="FitnessSection.setView('type')">By Type</button>
-          <button id="fitnessViewMuscle" data-mode="muscle" class="btn btn-secondary btn-sm" onclick="FitnessSection.setView('muscle')">By Muscle</button>
-          <button class="btn btn-primary" onclick="FitnessSection.openAddWorkout()">+ Log Workout</button>
-          <button class="btn btn-secondary" onclick="FitnessSection.openMuscleGuide()">💪 Exercise Guide</button>
-          <button class="btn btn-secondary" onclick="FitnessSection.openAddMetric()">📏 Body Metric</button>
+        <div class="section-actions" style="flex-wrap:wrap;">
+          <button class="btn btn-primary" onclick="FitnessSection.openLogPicker()">+ Log workout</button>
+          <button class="btn btn-ghost btn-sm" onclick="FitnessSection.openManageRoutines()">Manage routines</button>
+          <button class="btn btn-ghost btn-sm" onclick="FitnessSection.openAddMetric()">Log body metric</button>
+          <button class="btn btn-ghost btn-sm" onclick="FitnessSection.openExportPanel()" title="Download or print your fitness history">⬇ Export</button>
         </div>
       </div>
       <div id="fitnessList"></div>
@@ -4534,6 +4533,8 @@ if (!AppState.microCommitments)    AppState.microCommitments = [];
 if (!AppState.microLogs)           AppState.microLogs = {};
 if (!AppState.specialDays)         AppState.specialDays = []; // birthdays & holidays
 if (!AppState.medEffects)          AppState.medEffects = [];  // medication effects journal
+if (!AppState.fitnessRoutines)     AppState.fitnessRoutines = []; // v33 saved workout routines
+if (!AppState.fitnessSchedule)     AppState.fitnessSchedule = { Mon:null, Tue:null, Wed:null, Thu:null, Fri:null, Sat:null, Sun:null }; // v33 weekly plan
 
 function saveState() {
   StorageManager.save();
@@ -5618,9 +5619,28 @@ const Tasks = (() => {
       case 'today':
         list = list.filter(t => !t.done && Helpers.isToday(t.dueDate));
         break;
-      case 'week':
+      case 'week': {
         list = list.filter(t => !t.done && Helpers.isThisWeek(t.dueDate));
+        // v35 "ghost tasks": recurring tasks only materialize on their day, so
+        // this view used to look empty. Inject TEMPORARY previews for later
+        // this week — never saved to AppState.tasks, so "All" stays clean.
+        try {
+          for (let i = 1; i <= 6; i++) {
+            const d = new Date(); d.setDate(d.getDate() + i);
+            const iso = Helpers.toISODate(d);
+            (AppState.recurring || []).forEach(r => {
+              if (r.active === false) return;
+              if (typeof RecurringSection === 'undefined' || !RecurringSection.occursOn(r, iso)) return;
+              if (AppState.tasks.some(t => t.recurringId === r.id && t.dueDate === iso)) return;
+              list.push({ id: `preview-${r.id}-${iso}`, title: r.title, priority: r.priority || 'p3',
+                category: r.category || '', assignedTo: r.assignedTo || null, dueDate: iso,
+                dueTime: r.time || null, notes: r.notes || '', done: false,
+                recurringId: r.id, _preview: true, createdAt: '' });
+            });
+          }
+        } catch(e) { /* previews must never break the list */ }
         break;
+      }
       case 'overdue':
         list = list.filter(t => !t.done && t.dueDate && Helpers.isOverdue(t.dueDate));
         break;
@@ -5715,6 +5735,20 @@ const Tasks = (() => {
       container.innerHTML = clearAllBar + list.map(t => {
         const overdue = !t.done && t.dueDate && Helpers.isOverdue(t.dueDate);
         const isToday = !t.done && Helpers.isToday(t.dueDate);
+        // v35 ghost preview: an upcoming recurring occurrence, not a real task —
+        // faded, ⏳-marked, no checkbox/edit/delete (it materializes on its day)
+        if (t._preview) return `
+          <div class="task-card task-scheduled" style="opacity:0.6;" title="Upcoming recurring task — it appears for real on its day">
+            <div style="font-size:16px;flex-shrink:0;padding-top:2px;">⏳</div>
+            <div class="task-content">
+              <div class="task-title">${escHtml(t.title)}</div>
+              <div class="task-meta">
+                <span class="badge badge-neutral" style="font-size:10px;">🔄 Upcoming</span>
+                ${t.category ? `<span class="badge badge-neutral">${escHtml(t.category)}</span>` : ''}
+                <span class="task-due">🗓️ ${Helpers.formatDateShort(t.dueDate)}${t.dueTime ? ' · ⏰' + Helpers.formatTime(t.dueTime) : ''}</span>
+              </div>
+            </div>
+          </div>`;
         const dueDateHtml = t.dueDate ? (() => {
           try {
             const daysLate = overdue ? Helpers.daysDiff(t.dueDate, Helpers.today()) : 0;
@@ -8210,6 +8244,7 @@ const Budget = (() => {
   }
 
   function openImpulseCheck() {
+    window._ibOriginLogId = null; // fresh check — not a re-check of an existing log
     Modal.open({ title: "🛍️ Before You Buy", wide: true, body: `
       <div style="background:linear-gradient(135deg,rgba(139,92,246,0.08),rgba(236,72,153,0.06));border-radius:var(--radius-md);padding:var(--space-4);margin-bottom:var(--space-4);font-size:var(--text-sm);color:var(--text-secondary);">
         Your ADHD brain is wired for impulse. This 30-second check can save you money and regret.
@@ -8277,11 +8312,29 @@ const Budget = (() => {
     }
   }
 
+  // v35: a re-check UPDATES the original log entry instead of duplicating it —
+  // the "Bought" registry must reflect only real purchases, no orphaned
+  // "thinking about it" leftovers.
+  function _resolveImpulseLog(p, approved, extra) {
+    if (!AppState.budget.impulseLog) AppState.budget.impulseLog = [];
+    const orig = window._ibOriginLogId
+      ? AppState.budget.impulseLog.find(x => x.id === window._ibOriginLogId) : null;
+    if (orig) {
+      Object.assign(orig, { item: p.item, price: p.price, approved, date: Helpers.today(),
+        recheckedAt: new Date().toISOString(), ...(extra || {}) });
+      window._ibOriginLogId = null;
+      return orig;
+    }
+    const entry = { id: Helpers.uuid(), item: p.item, price: p.price, approved,
+      date: Helpers.today(), createdAt: new Date().toISOString(), ...(extra || {}) };
+    AppState.budget.impulseLog.unshift(entry);
+    return entry;
+  }
+
   function _impulseBuy() {
     const p = window._ibPending;
     if (!p) { Toast.show('Please run the analysis first', 'warning'); return; }
-    if (!AppState.budget.impulseLog) AppState.budget.impulseLog = [];
-    AppState.budget.impulseLog.unshift({ id:Helpers.uuid(), item:p.item, price:p.price, approved:true, date:Helpers.today(), createdAt:new Date().toISOString() });
+    _resolveImpulseLog(p, true);
     _logPurchaseExpense(p.item, p.price);
     saveState();
     window._ibPending = null;
@@ -8293,13 +8346,12 @@ const Budget = (() => {
   function _impulseWait() {
     const p = window._ibPending;
     if (!p) { Toast.show('Please run the analysis first', 'warning'); return; }
-    if (!AppState.budget.impulseLog) AppState.budget.impulseLog = [];
-    AppState.budget.impulseLog.unshift({ id:Helpers.uuid(), item:p.item, price:p.price, approved:false, date:Helpers.today(), createdAt:new Date().toISOString() });
+    const entry = _resolveImpulseLog(p, false);
     // Only a non-green verdict starts a 48h cool-down; green "Log & Close" just records the check
     if (!p.isGreen) {
       if (!AppState.budget.impulseReminders) AppState.budget.impulseReminders = [];
       const remindAt = new Date(); remindAt.setHours(remindAt.getHours() + 48);
-      AppState.budget.impulseReminders.push({ id:Helpers.uuid(), item:p.item, price:p.price, remindAt:remindAt.toISOString(), done:false, notified:false, createdAt:new Date().toISOString() });
+      AppState.budget.impulseReminders.push({ id:Helpers.uuid(), item:p.item, price:p.price, remindAt:remindAt.toISOString(), done:false, notified:false, logId:entry.id, createdAt:new Date().toISOString() });
     }
     saveState();
     const wasGreen = p.isGreen;
@@ -8366,6 +8418,9 @@ const Budget = (() => {
     const l = (AppState.budget.impulseLog || []).find(x => x.id === id);
     if (!l) return;
     openImpulseCheck();
+    // v35: remember which log entry this re-check belongs to — deciding will
+    // UPDATE that entry instead of leaving it behind and adding a duplicate
+    window._ibOriginLogId = id;
     setTimeout(() => {
       const item = document.getElementById('ibItem'); if (item) item.value = l.item;
       const price = document.getElementById('ibPrice'); if (price) price.value = l.price;
@@ -8385,11 +8440,17 @@ const Budget = (() => {
     r.decidedAt = new Date().toISOString();
     r.bought = !!buy;
     if (!AppState.budget.impulseLog) AppState.budget.impulseLog = [];
+    // v35: resolve the ORIGINAL log entry (linked via r.logId) instead of
+    // unshifting a duplicate; legacy reminders without a link fall back to
+    // creating one entry
+    const orig = r.logId ? AppState.budget.impulseLog.find(x => x.id === r.logId) : null;
     if (buy) {
-      AppState.budget.impulseLog.unshift({ id:Helpers.uuid(), item:r.item, price:r.price, approved:true, date:Helpers.today(), afterCooldown:true, createdAt:new Date().toISOString() });
+      if (orig) Object.assign(orig, { approved: true, date: Helpers.today(), afterCooldown: true, decidedAt: new Date().toISOString() });
+      else AppState.budget.impulseLog.unshift({ id:Helpers.uuid(), item:r.item, price:r.price, approved:true, date:Helpers.today(), afterCooldown:true, createdAt:new Date().toISOString() });
       _logPurchaseExpense(r.item, r.price);
       Toast.show('✅ Purchase logged to your expenses — you waited, so it\'s a considered buy!', 'success');
     } else {
+      if (orig) Object.assign(orig, { letGo: true, decidedAt: new Date().toISOString() }); // stays approved:false = "not bought"
       Toast.show(`💪 You just saved ${Helpers.currency(r.price)} by letting "${r.item}" go!`, 'success', 6000);
     }
     saveState();
@@ -8521,7 +8582,7 @@ const Budget = (() => {
       ['Name', 'Frequency', 'Amount', 'First payday', 'Notes'],
       ...(AppState.budget.income || []).map(i => [i.name, _freqLabel(i.frequency), (parseFloat(i.amount)||0).toFixed(2), i.firstPayday || '', i.notes || ''])];
     const text = csv.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
-    const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8;' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `budget_history_${fromIso}_to_${toIso}.csv`;
@@ -9922,9 +9983,19 @@ const AppNotify = (() => {
       const now = new Date();
       const hhmm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
       const today = Helpers.today();
+      // v35: fire when the time has PASSED (within a 3h grace window), not only
+      // on the exact minute — a throttled/locked device that skips the minute
+      // still alerts the moment it wakes up. Once per item per day via _fired;
+      // the window keeps a fresh page-open from re-toasting the whole morning.
+      const nowMin = now.getHours() * 60 + now.getMinutes();
+      const _dueWithinGrace = (t) => {
+        const [h, m2] = String(t).split(':').map(Number);
+        const diff = nowMin - (h * 60 + (m2 || 0));
+        return diff >= 0 && diff <= 180;
+      };
       (AppState.medication || []).forEach(m => (m.times || []).forEach(t => {
         const key = `med|${m.id}|${t}|${today}`;
-        if (t !== hhmm || _fired.has(key)) return;
+        if (!_dueWithinGrace(t) || _fired.has(key)) return;
         if ((AppState.medLogs[today] || {})[`${m.id}-${t}`]) return; // already taken
         _fired.add(key);
         notify('medication', `💊 Time for ${m.name}${m.dose ? ` (${m.dose})` : ''} — log it in Medication when taken.`, 10000);
@@ -9932,14 +10003,18 @@ const AppNotify = (() => {
       (AppState.tasks || []).forEach(t => {
         if (t.done || t.dueDate !== today || !t.dueTime) return;
         const key = `task|${t.id}|${t.dueTime}|${today}`;
-        if (t.dueTime !== hhmm || _fired.has(key)) return;
+        if (!_dueWithinGrace(t.dueTime) || _fired.has(key)) return;
         _fired.add(key);
         notify('tasks', `✅ Task due now: "${t.title}"`, 10000);
       });
       _deadlineCheck(today);
+      // 48h impulse check-ins used to fire only while the Budget tab was open
+      try { Budget._check48hReminders(); } catch(e) {}
     } catch(e) { /* reminders must never break the app */ }
   }
   setInterval(_tick, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) _tick(); }); // instant catch-up on unlock/tab-return
+  setTimeout(_tick, 3000); // sweep shortly after load too
 
   // Goal & savings target-date alerts: ≤5 days left or overdue (once per day each)
   function _deadlineCheck(today) {
@@ -9961,7 +10036,23 @@ const AppNotify = (() => {
   }
   setTimeout(() => { try { _deadlineCheck(); } catch(e) {} }, 4000); // one sweep shortly after load
 
-  return { notify, enabled, prefs, setCategory, setDesktop, CATEGORIES };
+  // v35: browsers only show system notifications after an explicit permission
+  // grant — ask ONCE on first load (a button click is required; calling
+  // requestPermission without a gesture is ignored on most mobile browsers).
+  function promptPermission() {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'default') return;               // already granted/denied
+    if (localStorage.getItem('adhd_planner_notifAsked')) return;     // asked before — don't nag
+    Modal.open({ title: '🔔 Turn on reminders?', body: `
+      <div style="font-size:var(--text-sm);color:var(--text-secondary);line-height:1.6;">
+        Want medication, task, time-block and deadline reminders to pop up even when the app isn't open?
+        Your device will ask you to allow notifications — everything stays on this device, nothing is sent anywhere.
+      </div>`,
+      footer: `<button class="btn btn-secondary" onclick="localStorage.setItem('adhd_planner_notifAsked','1'); Modal.close();">Not now</button>
+               <button class="btn btn-primary" onclick="localStorage.setItem('adhd_planner_notifAsked','1'); Modal.close(); AppNotify.setDesktop(true);">🔔 Turn on</button>` });
+  }
+
+  return { notify, enabled, prefs, setCategory, setDesktop, promptPermission, CATEGORIES };
 })();
 
 // ════════════════════════════════════════════════════════════════
@@ -11476,9 +11567,6 @@ const MealsSection = (() => {
 // FITNESS SECTION
 // ════════════════════════════════════════════════════════════════
 const FitnessSection = (() => {
-  let _weightChart = null;
-  let _viewMode = 'type'; // 'type' | 'muscle'
-
   // Exercise library — feeds the guide AND the builder's autocomplete
   const MUSCLE_GUIDE = {
     'Chest':     ['Push-ups', 'Bench Press', 'Chest Fly', 'Dips', 'Incline Press'],
@@ -11491,171 +11579,47 @@ const FitnessSection = (() => {
     'Full Body': ['Burpees', 'Kettlebell Swing', 'Clean & Press', 'Box Jump', 'Thrusters'],
   };
 
-  function setView(mode) {
-    _viewMode = mode;
-    ['fitnessViewType','fitnessViewMuscle'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.className = `btn btn-sm ${el.dataset.mode === mode ? 'btn-primary' : 'btn-secondary'}`;
-    });
-    render();
-  }
-
   function render() {
     const el = document.getElementById('fitnessList');
     if (!el) return;
     const workouts = AppState.fitness || [];
     const metrics  = AppState.bodyMetrics || [];
-    const recent   = [...workouts].sort((a,b) => b.date.localeCompare(a.date)).slice(0, 30);
-
-    // Group workouts
-    const groups = {};
-    const groupKey = w => _viewMode === 'muscle' ? (w.muscleGroup || 'General') : (w.type || 'Other');
-    recent.forEach(w => {
-      const k = groupKey(w);
-      if (!groups[k]) groups[k] = [];
-      groups[k].push(w);
-    });
-
-    const groupColors = {
-      Running:'#0EA5E9', Walking:'#10B981', Cycling:'#8B5CF6', Swimming:'#06B6D4',
-      'Weight Training':'#6366F1', HIIT:'#F59E0B', Yoga:'#EC4899', Other:'#64748B',
-      Chest:'#EF4444', Back:'#6366F1', Legs:'#F59E0B', Shoulders:'#0EA5E9',
-      Arms:'#8B5CF6', Core:'#10B981', Cardio:'#EC4899', 'Full Body':'#64748B', General:'#94A3B8'
-    };
-
-    const workoutsHtml = Object.keys(groups).length === 0
-      ? `<div class="empty-state" style="padding:var(--space-5);"><div class="empty-state-text">No workouts yet. Tap "+ Log Workout" to start.</div></div>`
-      : Object.entries(groups).map(([name, items]) => {
-          const color = groupColors[name] || '#6366F1';
-          const totalMins = items.reduce((s,w) => s+(w.duration||0), 0);
-          return `<div class="card mb-4" style="border-top:3px solid ${color};">
-            <div class="card-header">
-              <div>
-                <div class="card-title">${escHtml(name)}</div>
-                <div style="font-size:var(--text-xs);color:var(--text-muted);">${items.length} session${items.length>1?'s':''} · ${totalMins} min total</div>
-              </div>
-            </div>
-            <div class="card-body" style="padding-top:0;">
-              ${items.map(w => `
-                <div style="padding:var(--space-3) 0;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:var(--space-3);">
-                  <div style="flex:1;">
-                    <div style="display:flex;align-items:center;gap:var(--space-2);">
-                      <span style="font-weight:600;font-size:var(--text-sm);">${escHtml(w.type||'Workout')}</span>
-                      ${w.muscleGroup?`<span class="badge badge-neutral" style="font-size:10px;">${escHtml(w.muscleGroup)}</span>`:''}
-                      <span style="font-size:var(--text-xs);color:var(--text-muted);">· ${w.duration||0} min · ${Helpers.formatDateShort(w.date)}</span>
-                    </div>
-                    ${w.exercises && w.exercises.length ? `<div style="margin-top:5px;padding-left:10px;border-left:2px solid ${color}40;">
-                      ${w.exercises.map((e, ei) => {
-                        // Tap a number to edit it right on the card — no modal needed
-                        const ed = (field, val) => `<span contenteditable="true" title="Tap to edit"
-                          onclick="event.stopPropagation()"
-                          onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
-                          onblur="FitnessSection.inlineEditExercise('${w.id}',${ei},'${field}',this.textContent)"
-                          style="padding:0 4px;border-radius:3px;background:var(--bg-elevated);border:1px dashed var(--border);cursor:text;display:inline-block;min-width:14px;text-align:center;">${val}</span>`;
-                        return `<div style="font-size:var(--text-xs);color:var(--text-secondary);padding:2px 0;">
-                        <strong>${escHtml(e.name)}</strong>: ${ed('sets', e.sets)}×${ed('reps', e.reps)} @ ${ed('weight', e.weight || '–')}kg
-                      </div>`; }).join('')}
-                    </div>` : w.notes ? `<div style="font-size:var(--text-xs);color:var(--text-secondary);margin-top:4px;">${escHtml(w.notes)}</div>` : ''}
-                  </div>
-                  <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.openEditWorkout('${w.id}')" title="Edit">✏️</button>
-                  <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.deleteWorkout('${w.id}')">🗑️</button>
-                </div>`).join('')}
-            </div>
-          </div>`;
-        }).join('');
-
-    // Monthly progress: sessions + minutes per type for the current month
-    const monthKey   = Helpers.today().slice(0, 7);
-    const monthLabel = new Date().toLocaleDateString('en-US', { month:'long' });
-    const monthWorkouts = workouts.filter(w => w.date && w.date.startsWith(monthKey));
-    const monthMins  = monthWorkouts.reduce((s,w) => s + (parseFloat(w.duration)||0), 0);
-    const byType = {};
-    monthWorkouts.forEach(w => {
-      const k = w.type || 'Other';
-      if (!byType[k]) byType[k] = { sessions:0, mins:0 };
-      byType[k].sessions++; byType[k].mins += parseFloat(w.duration)||0;
-    });
-    const maxMins = Math.max(1, ...Object.values(byType).map(t => t.mins));
-    const monthHtml = `
-      <div class="card mb-4" style="border:1.5px solid rgba(99,102,241,0.25);">
-        <div class="card-header" style="background:linear-gradient(135deg,rgba(99,102,241,0.06),rgba(16,185,129,0.05));">
-          <div>
-            <div class="card-title">🏅 ${monthLabel} Progress</div>
-            <div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px;">${monthWorkouts.length} session${monthWorkouts.length===1?'':'s'} · ${Math.round(monthMins)} min (${(monthMins/60).toFixed(1)}h) total this month</div>
-          </div>
-        </div>
-        <div class="card-body">
-          ${!monthWorkouts.length
-            ? '<div style="color:var(--text-muted);font-size:var(--text-sm);">No workouts logged this month yet — the first one is the hardest. You\'ve got this 💪</div>'
-            : Object.entries(byType).sort((a,b) => b[1].mins - a[1].mins).map(([type, t]) => {
-                const color = groupColors[type] || '#6366F1';
-                return `<div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) 0;">
-                  <span style="width:110px;flex-shrink:0;font-size:var(--text-sm);font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(type)}</span>
-                  <div style="flex:1;background:var(--border);border-radius:var(--radius-full);height:8px;overflow:hidden;">
-                    <div style="height:100%;width:${Math.round((t.mins/maxMins)*100)}%;background:${color};border-radius:var(--radius-full);transition:width 0.4s;"></div>
-                  </div>
-                  <span style="width:120px;flex-shrink:0;text-align:right;font-size:var(--text-xs);color:var(--text-muted);">${t.sessions} session${t.sessions===1?'':'s'} · ${Math.round(t.mins)} min</span>
-                </div>`;
-              }).join('')}
-        </div>
-      </div>`;
-
-    // Weight vs height entries (legacy entries without a kind are weight)
-    const weights = metrics.filter(m => (m.kind || 'weight') !== 'height');
-    const heights = metrics.filter(m => m.kind === 'height');
-    const metricRow = (m, val) => `
-            <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--space-2) 0;border-bottom:1px solid var(--border);">
-              <span style="font-size:var(--text-sm);">${Helpers.formatDateShort(m.date)}</span>
-              <span style="font-size:var(--text-sm);font-weight:700;color:var(--accent-primary);">${val} ${m.unit||'kg'}</span>
-              <span style="display:flex;gap:2px;">
-                <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.openEditMetric('${m.id}')" title="Edit">✏️</button>
-                <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.deleteMetric('${m.id}')">🗑️</button>
-              </span>
-            </div>`;
-    el.innerHTML = monthHtml + _heatmapCard(workouts) + workoutsHtml + `
-      <div class="card mt-2">
+    const real = workouts.filter(w => !w.rest).length;
+    const rests = workouts.length - real;
+    const lastDate = [...workouts, ...metrics].map(x => x.date).filter(Boolean).sort().pop();
+    // v34 MVP: the default view is deliberately minimal — heatmap + one summary
+    // card. Everything else (lists, edits, charts) lives behind the Entries view.
+    el.innerHTML = _heatmapCard(workouts) + `
+      <div class="card" style="cursor:pointer;" onclick="FitnessSection.openEntriesView()" title="See, edit or delete everything you've logged">
         <div class="card-header">
-          <div class="card-title">📊 Weight Trend &amp; Body Metrics</div>
-          <button class="btn btn-ghost btn-sm" onclick="FitnessSection.openAddMetric()">+ Log metric</button>
-        </div>
-        <div class="card-body">
-          ${weights.length < 2
-            ? `<div style="color:var(--text-muted);font-size:var(--text-sm);margin-bottom:var(--space-3);">Log at least 2 weight entries to see your trend.</div>`
-            : `<div style="height:180px;position:relative;margin-bottom:var(--space-3);"><canvas id="weightTrendChart"></canvas></div>`}
-          ${weights.length ? `<div style="font-size:var(--text-xs);font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:2px;">⚖️ Weight</div>
-            <div>${[...weights].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,5).map(m => metricRow(m, m.weight)).join('')}</div>`
-          : `<div style="color:var(--text-muted);font-size:var(--text-sm);">No weight entries yet.</div>`}
-          ${heights.length ? `<div style="font-size:var(--text-xs);font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin:var(--space-3) 0 2px;">📏 Height</div>
-            <div>${[...heights].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,3).map(m => metricRow(m, m.height)).join('')}</div>` : ''}
+          <div>
+            <div class="card-title">🗂️ Logged entries</div>
+            <div style="font-size:var(--text-xs);color:var(--text-muted);margin-top:2px;">
+              ${(workouts.length + metrics.length)
+                ? `${real} workout${real === 1 ? '' : 's'}${rests ? ` · ${rests} rest day${rests === 1 ? '' : 's'}` : ''} · ${metrics.length} body metric${metrics.length === 1 ? '' : 's'}${lastDate ? ' · last: ' + Helpers.formatDateShort(lastDate) : ''}`
+                : 'Nothing logged yet — tap "+ Log workout" to start.'}
+            </div>
+          </div>
+          <span class="btn btn-secondary btn-sm">Open →</span>
         </div>
       </div>`;
-
-    // Weight chart (weight entries only — height has its own list)
-    if (weights.length >= 2) {
-      const canvas = document.getElementById('weightTrendChart');
-      const sorted = [...weights].sort((a,b)=>a.date.localeCompare(b.date)).slice(-30);
-      _weightChart = ChartMount.mount(canvas, {
-        type: 'line',
-        data: { labels: sorted.map(m => Helpers.formatDateShort(m.date)),
-          datasets: [{ label:'Weight', data: sorted.map(m => parseFloat(m.weight)||0),
-            borderColor:'#6366F1', backgroundColor:'rgba(99,102,241,0.08)',
-            tension:0.4, fill:true, pointRadius:4, pointHoverRadius:6 }]
-        },
-        options: { responsive:true, maintainAspectRatio:false,
-          plugins:{ legend:{display:false}, tooltip:{callbacks:{label:c=>` ${c.raw} ${sorted[c.dataIndex]?.unit||'kg'}`}} },
-          scales:{
-            y:{ticks:{color:ChartTheme.textSoft(),font:{family:'Inter',size:11}},grid:{color:ChartTheme.grid()}},
-            x:{ticks:{maxTicksLimit:8,color:ChartTheme.text(),font:{family:'Inter',size:11}},grid:{display:false}}
-          }
-        }
-      });
-    }
   }
 
   // 3-month consistency heatmap — ORANGE scale, shaded by minutes moved that day
   function _heatmapCard(workouts) {
     const byDay = {};
-    (workouts || []).forEach(w => { if (w.date) byDay[w.date] = (byDay[w.date] || 0) + (parseFloat(w.duration) || 0); });
+    const namesByDay = {}; // tooltip also names the routine(s) done that day
+    const feelByDay = {};  // v34: and how it felt
+    const restDays = new Set(); // v34: logged rest days show blue (a workout color wins)
+    const routineById = Object.fromEntries((AppState.fitnessRoutines || []).map(r => [r.id, r.name]));
+    (workouts || []).forEach(w => {
+      if (!w.date) return;
+      if (w.rest) { restDays.add(w.date); return; }
+      byDay[w.date] = (byDay[w.date] || 0) + (parseFloat(w.duration) || 0);
+      const rn = w.routineId && routineById[w.routineId];
+      if (rn) (namesByDay[w.date] = namesByDay[w.date] || new Set()).add(rn);
+      if (w.feel && FEELS[w.feel]) feelByDay[w.date] = FEELS[w.feel];
+    });
     const end = new Date(); end.setHours(12, 0, 0, 0);
     const start = new Date(end); start.setDate(start.getDate() - 90);
     start.setDate(start.getDate() - start.getDay()); // align to week start
@@ -11666,7 +11630,9 @@ const FitnessSection = (() => {
       const col = [];
       for (let i = 0; i < 7; i++) {
         const iso = Helpers.toISODate(d);
-        col.push(`<div title="${Helpers.formatDateShort(iso)} — ${byDay[iso] ? Math.round(byDay[iso]) + ' min' : 'rest day'}" style="width:12px;height:12px;border-radius:3px;background:${d > end ? 'transparent' : shade(byDay[iso] || 0)};"></div>`);
+        col.push(`<div title="${Helpers.formatDateShort(iso)} — ${byDay[iso]
+            ? Math.round(byDay[iso]) + ' min' + (namesByDay[iso] ? ' · ' + escHtml([...namesByDay[iso]].join(', ')) : '') + (feelByDay[iso] ? ' · ' + feelByDay[iso] : '')
+            : restDays.has(iso) ? 'rest day 😴 (logged)' : 'rest day'}" style="width:12px;height:12px;border-radius:3px;background:${d > end ? 'transparent' : (byDay[iso] ? shade(byDay[iso]) : restDays.has(iso) ? '#38BDF8' : shade(0))};"></div>`);
         d.setDate(d.getDate() + 1);
       }
       weeks.push(`<div style="display:flex;flex-direction:column;gap:3px;">${col.join('')}</div>`);
@@ -11686,13 +11652,458 @@ const FitnessSection = (() => {
     </div>`;
   }
 
+  // ══ v34 FITNESS MVP — one-button logging, type-aware routines, entries view, export ══
+  function _routineById(id) { return (AppState.fitnessRoutines || []).find(r => r.id === id); }
+  const FEELS = { rough:'😣', meh:'😐', good:'🙂', great:'💪' };
+  const CARDIO_TYPES = ['Running','Walking','Cycling','Swimming','HIIT','Yoga'];
+
+  // Confetti celebration — same style as Goals/Debts (their helper is IIFE-private)
+  function _celebrateLog(title, message) {
+    const emojis = ['🎉','🎊','⭐','🏆','💚','✨','🥳','💪'];
+    const confetti = Array.from({ length: 24 }, (_, i) => {
+      const e = emojis[i % emojis.length];
+      return `<span class="confetti-piece" style="left:${Math.round(Math.random()*96)}%;animation-delay:${(Math.random()*2.2).toFixed(2)}s;animation-duration:${(2+Math.random()*1.6).toFixed(2)}s;">${e}</span>`;
+    }).join('');
+    Modal.open({ title: `🏆 ${title}`,
+      body: `<div class="confetti-stage">${confetti}</div>
+        <div style="text-align:center;animation:celebratePop 0.5s ease-out;">
+          <div style="font-size:56px;margin-bottom:var(--space-2);">💪</div>
+          <div style="font-family:var(--font-display);font-size:var(--text-lg);font-weight:800;color:var(--accent-success);margin-bottom:var(--space-2);">${title}</div>
+          <div style="font-size:var(--text-sm);color:var(--text-secondary);">${message}</div>
+        </div>`,
+      footer: `<button class="btn btn-primary w-full" onclick="Modal.close()">🎉 Nice — Close</button>` });
+  }
+
+  // ── Log picker: routine rows / freestyle / rest day ──────
+  function openLogPicker() {
+    _entriesTab = null;
+    const routines = AppState.fitnessRoutines || [];
+    const row = (onclick, icon, name, sub, cta) => `
+      <div onclick="${onclick}" style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3);background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--space-2);cursor:pointer;">
+        <span style="font-size:18px;flex-shrink:0;">${icon}</span>
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:var(--text-sm);">${name}</div>
+          <div style="font-size:var(--text-xs);color:var(--text-muted);">${sub}</div>
+        </div>
+        <span class="btn btn-secondary btn-sm">${cta}</span>
+      </div>`;
+    Modal.open({ title: '💪 Log a workout', body: `
+      ${routines.map(r => row(`FitnessSection.openLogForm('${r.id}')`, '📋', escHtml(r.name),
+        `${(r.exercises || []).length ? r.exercises.length + ' exercise' + (r.exercises.length === 1 ? '' : 's') : 'cardio'} · ~${r.durationMin} min`, 'Log →')).join('')}
+      ${!routines.length ? `<div style="color:var(--text-muted);font-size:var(--text-sm);margin-bottom:var(--space-3);">No saved routines yet — save your go-to workouts once and logging becomes one tap. <button class="btn btn-ghost btn-sm" onclick="FitnessSection.openManageRoutines()">+ Add a routine</button></div>` : ''}
+      ${row('FitnessSection.openLogForm(null)', '🏃', 'Freestyle', 'No routine — just duration and how it felt', 'Log →')}
+      ${row('FitnessSection.logRestDay()', '😴', 'Rest day', 'One tap, no form — recovery counts', '✓')}`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>` });
+  }
+
+  let _logFeel = null;
+  const _feelRow = (sel) => `<div class="form-group"><label class="form-label">How did it feel?</label>
+    <div id="feelRow" style="display:flex;gap:var(--space-2);flex-wrap:wrap;">
+      ${Object.entries(FEELS).map(([k, e]) => `<button type="button" class="btn ${sel === k ? 'btn-primary' : 'btn-secondary'} btn-sm" data-feel="${k}" onclick="FitnessSection.setLogFeel('${k}')">${e} ${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}
+    </div></div>`;
+
+  function setLogFeel(k) {
+    _logFeel = _logFeel === k ? null : k; // tap again to unset
+    document.querySelectorAll('#feelRow [data-feel]').forEach(b =>
+      b.className = `btn ${b.dataset.feel === _logFeel ? 'btn-primary' : 'btn-secondary'} btn-sm`);
+  }
+
+  function openLogForm(routineId) {
+    const r = routineId ? _routineById(routineId) : null;
+    _logFeel = null;
+    Modal.open({ title: r ? `💪 Log: ${escHtml(r.name)}` : '🏃 Log freestyle workout', body: `
+      ${r && (r.exercises || []).length ? `<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-3);margin-bottom:var(--space-3);">
+        <div style="font-size:var(--text-xs);font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:4px;">Planned exercises</div>
+        ${r.exercises.map(e => `<div style="font-size:var(--text-xs);color:var(--text-secondary);padding:2px 0;">• <strong>${escHtml(e.name)}</strong> ${e.sets}×${e.reps}${e.weight ? ' @ ' + e.weight + 'kg' : ''}</div>`).join('')}
+        <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">To change these, edit the routine in Manage Routines.</div>
+      </div>` : ''}
+      <div class="form-group"><label class="form-label">Duration (minutes)</label>
+        <input class="input" type="number" id="lfDuration" min="1" value="${r ? r.durationMin : 30}" /></div>
+      ${_feelRow(null)}
+      <div class="form-group"><label class="form-label">Notes (optional)</label>
+        <textarea class="textarea" id="lfNotes" rows="2" placeholder="PRs, energy, anything worth remembering..."></textarea></div>`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
+               <button class="btn btn-primary" onclick="FitnessSection.submitLogForm('${routineId || ''}')">Log it →</button>` });
+  }
+
+  function submitLogForm(routineId) {
+    const r = routineId ? _routineById(routineId) : null;
+    AppState.fitness.push({ id: Helpers.uuid(),
+      type: r ? r.name : 'Freestyle',
+      muscleGroup: r ? (r.muscleGroup || '') : '',
+      duration: parseInt(document.getElementById('lfDuration')?.value) || (r ? r.durationMin : 0),
+      date: Helpers.today(),
+      notes: document.getElementById('lfNotes')?.value.trim() || '',
+      exercises: r ? (r.exercises || []).map(e => ({ ...e })) : [],
+      ...(r ? { routineId: r.id } : {}),
+      feel: _logFeel,
+      createdAt: new Date().toISOString() });
+    const feel = _logFeel;
+    _logFeel = null;
+    saveState(); Modal.close(); render();
+    _celebrateLog('Workout logged!', `${r ? `"${escHtml(r.name)}" done` : 'Session logged'}${feel && FEELS[feel] ? ' · felt ' + FEELS[feel] : ''} — every session counts.`);
+  }
+
+  function logRestDay() {
+    AppState.fitness.push({ id: Helpers.uuid(), type: 'Rest day', rest: true, duration: 0,
+      date: Helpers.today(), feel: null, exercises: [], notes: '', createdAt: new Date().toISOString() });
+    saveState(); Modal.close(); render();
+    Toast.show('😴 Rest day logged — recovery is training too.', 'info');
+  }
+
+  // ── Manage routines (the ONLY place routine templates are edited) ──────
+  function openManageRoutines() {
+    _entriesTab = null;
+    const routines = AppState.fitnessRoutines || [];
+    Modal.open({ title: '📄 Manage Routines', wide: true, body:
+      (routines.length ? routines.map(r => `
+        <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3);background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--space-2);">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;font-size:var(--text-sm);">${escHtml(r.name)}</div>
+            <div style="font-size:var(--text-xs);color:var(--text-muted);">${escHtml(r.type || 'Other')}${r.muscleGroup ? ' · ' + escHtml(r.muscleGroup) : ''} · ${(r.exercises || []).length ? r.exercises.length + ' exercise' + (r.exercises.length === 1 ? '' : 's') : 'cardio'} · ~${r.durationMin} min</div>
+          </div>
+          <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.openRoutineForm('${r.id}')" title="Edit">✏️</button>
+          <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.deleteRoutine('${r.id}')" title="Delete (logged workouts are kept)">🗑️</button>
+        </div>`).join('')
+      : '<div style="color:var(--text-muted);font-size:var(--text-sm);margin-bottom:var(--space-3);">No routines yet. Save your go-to workouts once — logging them is one tap after that.</div>'),
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Close</button>
+               <button class="btn btn-primary" onclick="FitnessSection.openRoutineForm()">+ New routine</button>` });
+  }
+
+  // ── Type-aware routine form ──────
+  let _routineExBuilder = [];
+  let _routineEditId = null;
+
+  function openRoutineForm(routineId) {
+    const r = routineId ? _routineById(routineId) : null;
+    _routineEditId = routineId || null;
+    _routineExBuilder = r ? (r.exercises || []).map(e => ({ ...e })) : [];
+    Modal.open({ title: r ? '✏️ Edit Routine' : '➕ New Routine', wide: true, body: `
+      <div class="form-group"><label class="form-label">Name <span style="color:var(--accent-danger)">*</span></label>
+        <input class="input" id="rfName" maxlength="60" placeholder="e.g. Push Day 💪, Morning Run..." value="${r ? escHtml(r.name) : ''}" /></div>
+      <div class="grid-2">
+        <div class="form-group"><label class="form-label">Type</label>
+          <select class="select" id="rfType" onchange="FitnessSection.routineTypeChanged()">
+            ${['Weight Training','Running','Walking','Cycling','Swimming','HIIT','Yoga','Other'].map(t => `<option ${(r ? r.type === t : t === 'Weight Training') ? 'selected' : ''}>${t}</option>`).join('')}
+          </select></div>
+        <div class="form-group"><label class="form-label">Duration (min)</label>
+          <input class="input" type="number" id="rfDuration" min="1" placeholder="30" value="${r ? r.durationMin : ''}" /></div>
+      </div>
+      <div id="rfExArea"></div>
+      <div class="form-group"><label class="form-label">Notes (optional)</label>
+        <textarea class="textarea" id="rfNotes" rows="2" placeholder="Warm-up cues, tempo, anything future-you needs...">${r ? escHtml(r.notes || '') : ''}</textarea></div>`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
+               <button class="btn btn-primary" onclick="FitnessSection.submitRoutineForm()">${r ? '✓ Save Changes' : 'Save Routine →'}</button>` });
+    _renderRoutineExArea(r ? r.muscleGroup : '');
+  }
+
+  function routineTypeChanged() {
+    const type = document.getElementById('rfType')?.value;
+    if (CARDIO_TYPES.includes(type) && _routineExBuilder.length) {
+      _routineExBuilder = [];
+      Toast.show("Exercises cleared — cardio routines don't need them", 'info');
+    }
+    _renderRoutineExArea(document.getElementById('rfMuscle')?.value || '');
+  }
+
+  function _renderRoutineExArea(selectedMuscle) {
+    const area = document.getElementById('rfExArea');
+    if (!area) return;
+    const type = document.getElementById('rfType')?.value;
+    if (CARDIO_TYPES.includes(type)) {
+      area.innerHTML = `<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-3);margin-bottom:var(--space-4);font-size:var(--text-sm);color:var(--text-muted);">🏃 Cardio routines just need a duration — no exercise list required.</div>`;
+      return;
+    }
+    const isWeights = type === 'Weight Training';
+    const muscle = isWeights ? (selectedMuscle || '') : '';
+    const suggested = muscle ? (MUSCLE_GUIDE[muscle] || []) : [];
+    area.innerHTML = `
+      ${isWeights ? `<div class="form-group"><label class="form-label">Muscle group</label>
+        <select class="select" id="rfMuscle" onchange="FitnessSection.routineMuscleChanged()">
+          <option value="">— Pick a group for suggestions —</option>
+          ${Object.keys(MUSCLE_GUIDE).map(g => `<option ${muscle === g ? 'selected' : ''}>${g}</option>`).join('')}
+        </select></div>
+        ${suggested.length ? `<div style="display:flex;flex-wrap:wrap;gap:var(--space-2);margin-bottom:var(--space-3);">
+          ${suggested.map(n => { const on = _routineExBuilder.some(e => e.name === n);
+            return `<button type="button" class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="FitnessSection.toggleRoutineExercise('${escHtml(n)}')">${on ? '✓ ' : ''}${n}</button>`; }).join('')}
+        </div>` : ''}` : ''}
+      <div class="form-group"><label class="form-label">${isWeights ? 'Custom exercise (anything not in the list)' : 'Exercises'}</label>
+        <div style="display:flex;gap:var(--space-2);">
+          <input class="input" id="rfCustomEx" placeholder="Type anything..." maxlength="60" style="flex:1;" onkeydown="if(event.key==='Enter'){event.preventDefault();FitnessSection.addRoutineCustomExercise();}" />
+          <button type="button" class="btn btn-secondary" onclick="FitnessSection.addRoutineCustomExercise()">+ Add</button>
+        </div></div>
+      <div id="rfSelectedList" style="margin-bottom:var(--space-4);"></div>`;
+    _renderRoutineSelected();
+  }
+
+  function routineMuscleChanged() { _renderRoutineExArea(document.getElementById('rfMuscle')?.value || ''); }
+
+  function toggleRoutineExercise(name) {
+    const i = _routineExBuilder.findIndex(e => e.name === name);
+    if (i >= 0) _routineExBuilder.splice(i, 1);
+    else _routineExBuilder.push({ name, sets: 3, reps: 10, weight: '' });
+    _renderRoutineExArea(document.getElementById('rfMuscle')?.value || '');
+  }
+
+  function addRoutineCustomExercise() {
+    const el = document.getElementById('rfCustomEx');
+    const name = el?.value.trim();
+    if (!name) { Toast.show('Type an exercise name first', 'warning'); return; }
+    _routineExBuilder.push({ name, sets: 3, reps: 10, weight: '' });
+    el.value = '';
+    _renderRoutineSelected();
+    el.focus();
+  }
+
+  // Every entry path (suggested / custom / other) lands here: one list,
+  // sets/reps/weight editable inline per row
+  function _renderRoutineSelected() {
+    const el = document.getElementById('rfSelectedList');
+    if (!el) return;
+    el.innerHTML = _routineExBuilder.length ? `
+      <div style="font-size:var(--text-xs);font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);margin-bottom:4px;">Selected exercises</div>
+      ${_routineExBuilder.map((e, i) => `
+        <div style="display:flex;align-items:center;gap:var(--space-2);padding:var(--space-2) var(--space-3);background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--space-1);font-size:var(--text-sm);flex-wrap:wrap;">
+          <span style="flex:1;min-width:110px;font-weight:600;">${escHtml(e.name)}</span>
+          <label style="font-size:10px;color:var(--text-muted);">Sets <input class="input" type="number" min="1" value="${e.sets}" style="width:56px;padding:4px 6px;" onchange="FitnessSection.updateRoutineEx(${i},'sets',this.value)" /></label>
+          <label style="font-size:10px;color:var(--text-muted);">Reps <input class="input" type="number" min="1" value="${e.reps}" style="width:56px;padding:4px 6px;" onchange="FitnessSection.updateRoutineEx(${i},'reps',this.value)" /></label>
+          <label style="font-size:10px;color:var(--text-muted);">Kg <input class="input" type="number" min="0" step="0.5" value="${e.weight}" style="width:64px;padding:4px 6px;" onchange="FitnessSection.updateRoutineEx(${i},'weight',this.value)" /></label>
+          <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.removeRoutineEx(${i})" title="Remove">✕</button>
+        </div>`).join('')}`
+      : `<div style="color:var(--text-muted);font-size:var(--text-xs);">No exercises selected yet.</div>`;
+  }
+
+  function updateRoutineEx(i, field, value) {
+    const e = _routineExBuilder[i];
+    if (!e) return;
+    if (field === 'weight') e.weight = value === '' ? '' : value;
+    else e[field] = Math.max(1, parseInt(value) || 1);
+  }
+
+  function removeRoutineEx(i) { _routineExBuilder.splice(i, 1); _renderRoutineSelected(); }
+
+  function submitRoutineForm() {
+    const name = document.getElementById('rfName')?.value.trim();
+    if (!name) { Toast.show('Give the routine a name', 'warning'); return; }
+    // Capture a typed-but-not-added custom exercise — no lost work
+    if (document.getElementById('rfCustomEx')?.value.trim()) addRoutineCustomExercise();
+    const type = document.getElementById('rfType')?.value || 'Other';
+    const vals = { name, type,
+      muscleGroup: type === 'Weight Training' ? (document.getElementById('rfMuscle')?.value || '') : '',
+      durationMin: parseInt(document.getElementById('rfDuration')?.value) || 30,
+      exercises: CARDIO_TYPES.includes(type) ? [] : _routineExBuilder.map(e => ({ ...e })),
+      notes: document.getElementById('rfNotes')?.value.trim() || '' };
+    if (_routineEditId) {
+      const r = _routineById(_routineEditId);
+      if (r) Object.assign(r, vals);
+      Toast.show('Routine updated ✅', 'success');
+    } else {
+      if (!AppState.fitnessRoutines) AppState.fitnessRoutines = [];
+      AppState.fitnessRoutines.push({ id: Helpers.uuid(), ...vals, createdAt: new Date().toISOString() });
+      Toast.show(`Routine "${vals.name}" saved 💪`, 'success');
+    }
+    _routineExBuilder = []; _routineEditId = null;
+    saveState(); openManageRoutines(); // back to the refreshed list
+  }
+
+  async function deleteRoutine(id) {
+    const r = _routineById(id);
+    if (!r) return;
+    const ok = await Modal.confirm({ title: 'Delete Routine',
+      message: `Delete "${r.name}"? Past workouts logged from it are kept — only the template is removed.`,
+      confirmText: 'Delete', cancelText: 'Keep it', danger: true });
+    AppState.fitnessRoutines = ok ? AppState.fitnessRoutines.filter(x => x.id !== id) : AppState.fitnessRoutines;
+    if (ok) {
+      const sched = AppState.fitnessSchedule || {};
+      Object.keys(sched).forEach(d => { if (sched[d] === id) sched[d] = null; });
+      saveState(); render();
+      Toast.show('Routine deleted', 'info');
+    }
+    openManageRoutines(); // reopen the list either way (confirm closed it)
+  }
+
+  // ── Entries view: every logged thing, editable, in one drill-down modal ──────
+  let _entriesTab = null;
+
+  function openEntriesView(tab) {
+    _entriesTab = tab || 'workouts';
+    const isW = _entriesTab === 'workouts';
+    Modal.open({ title: '🗂️ Logged Entries', wide: true, body: `
+      <div class="filter-tabs" style="margin-bottom:var(--space-3);width:fit-content;">
+        <div class="filter-tab ${isW ? 'active' : ''}" onclick="FitnessSection.openEntriesView('workouts')">💪 Workouts</div>
+        <div class="filter-tab ${!isW ? 'active' : ''}" onclick="FitnessSection.openEntriesView('metrics')">⚖️ Body metrics</div>
+      </div>
+      ${isW ? _entriesWorkoutsHtml() : _entriesMetricsHtml()}`,
+      footer: `<button class="btn btn-primary" onclick="FitnessSection.closeEntries()">Done</button>` });
+    if (!isW) _mountEntriesWeightChart();
+  }
+
+  function closeEntries() { _entriesTab = null; Modal.close(); }
+  function _reopenEntriesIfNeeded() { if (_entriesTab) openEntriesView(_entriesTab); }
+
+  function _entriesWorkoutsHtml() {
+    const all = [...(AppState.fitness || [])].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    if (!all.length) return '<div style="color:var(--text-muted);font-size:var(--text-sm);">No workouts logged yet.</div>';
+    return all.slice(0, 30).map(w => `
+      <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--space-1);">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:var(--text-sm);font-weight:600;">${w.rest ? '😴 Rest day' : escHtml(w.type || 'Workout')}${w.feel && FEELS[w.feel] ? ' ' + FEELS[w.feel] : ''}</div>
+          <div style="font-size:var(--text-xs);color:var(--text-muted);">${Helpers.formatDateShort(w.date)}${w.rest ? '' : ` · ${w.duration || 0} min`}${w.notes ? ' · ' + escHtml(w.notes.slice(0, 40)) + (w.notes.length > 40 ? '…' : '') : ''}</div>
+        </div>
+        ${w.rest ? '' : `<button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.openEditWorkout('${w.id}')" title="Edit">✏️</button>`}
+        <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.deleteWorkout('${w.id}')" title="Delete">🗑️</button>
+      </div>`).join('')
+      + (all.length > 30 ? `<div style="font-size:var(--text-xs);color:var(--text-muted);text-align:center;margin-top:var(--space-2);">Showing the latest 30 of ${all.length} — use ⬇ Export for the full history.</div>` : '');
+  }
+
+  function _entriesMetricsHtml() {
+    const all = [...(AppState.bodyMetrics || [])].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    return _weightTrendHtml() + (all.length ? all.map(m => `
+      <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) var(--space-3);background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:var(--space-1);">
+        <div style="flex:1;">
+          <div style="font-size:var(--text-sm);font-weight:600;">${m.kind === 'height' ? '📏 Height' : '⚖️ Weight'} · ${(m.kind === 'height' ? m.height : m.weight)} ${m.unit || 'kg'}</div>
+          <div style="font-size:var(--text-xs);color:var(--text-muted);">${Helpers.formatDateShort(m.date)}</div>
+        </div>
+        <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.openEditMetric('${m.id}')" title="Edit">✏️</button>
+        <button class="btn btn-ghost btn-icon-sm" onclick="FitnessSection.deleteMetric('${m.id}')" title="Delete">🗑️</button>
+      </div>`).join('') : '<div style="color:var(--text-muted);font-size:var(--text-sm);">No body metrics yet.</div>');
+  }
+
+  // v35: back to the polished Chart.js weight trend (tension/fill/points) —
+  // mounted into the Entries modal via ChartMount, re-created on every
+  // metric add/edit/delete because the whole tab re-renders
+  function _weightPoints() {
+    return (AppState.bodyMetrics || []).filter(m => (m.kind || 'weight') !== 'height' && m.weight != null)
+      .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  }
+
+  function _weightTrendHtml() {
+    const pts = _weightPoints();
+    if (pts.length < 2) return `<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-3);margin-bottom:var(--space-3);font-size:var(--text-sm);color:var(--text-muted);">📈 Log weight at least twice to see a trend line.</div>`;
+    const vals = pts.map(p => parseFloat(p.weight) || 0);
+    const delta = +(vals[vals.length - 1] - vals[0]).toFixed(1);
+    const unit = pts[pts.length - 1].unit || 'kg';
+    return `<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-3);margin-bottom:var(--space-3);">
+      <div style="height:180px;position:relative;"><canvas id="entriesWeightChart"></canvas></div>
+      <div style="font-size:var(--text-xs);color:var(--text-muted);text-align:center;margin-top:6px;">
+        ${Helpers.formatDateShort(pts[0].date)} → ${Helpers.formatDateShort(pts[pts.length - 1].date)} · ${vals[0]}${unit} → ${vals[vals.length - 1]}${unit} (${delta > 0 ? '+' : ''}${delta} ${unit})
+      </div>
+    </div>`;
+  }
+
+  function _mountEntriesWeightChart() {
+    const canvas = document.getElementById('entriesWeightChart');
+    if (!canvas) return;
+    const pts = _weightPoints().slice(-30);
+    ChartMount.mount(canvas, {
+      type: 'line',
+      data: { labels: pts.map(m => Helpers.formatDateShort(m.date)),
+        datasets: [{ label:'Weight', data: pts.map(m => parseFloat(m.weight)||0),
+          borderColor:'#6366F1', backgroundColor:'rgba(99,102,241,0.08)',
+          tension:0.4, fill:true, pointRadius:4, pointHoverRadius:6 }]
+      },
+      options: { responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{callbacks:{label:c=>` ${c.raw} ${pts[c.dataIndex]?.unit||'kg'}`}} },
+        scales:{
+          y:{ticks:{color:ChartTheme.textSoft(),font:{family:'Inter',size:11}},grid:{color:ChartTheme.grid()}},
+          x:{ticks:{maxTicksLimit:8,color:ChartTheme.text(),font:{family:'Inter',size:11}},grid:{display:false}}
+        }
+      }
+    });
+  }
+
+  // ── Export — same print-to-PDF / BOM-CSV pattern as Medication history ──────
+  function openExportPanel() {
+    _entriesTab = null;
+    const dates = [...(AppState.fitness || []), ...(AppState.bodyMetrics || [])].map(x => x.date).filter(Boolean).sort();
+    Modal.open({ title: '⬇ Export Fitness History', body: `
+      <div style="font-size:var(--text-sm);color:var(--text-secondary);margin-bottom:var(--space-4);">Pick the period — the export includes workouts, rest days and body metrics.</div>
+      <div class="grid-2">
+        <div class="form-group"><label class="form-label">From</label><input class="input" type="date" id="fhFrom" value="${dates[0] || Helpers.today()}" /></div>
+        <div class="form-group"><label class="form-label">To</label><input class="input" type="date" id="fhTo" value="${Helpers.today()}" /></div>
+      </div>`,
+      footer: `<button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
+               <div style="flex:1;"></div>
+               <button class="btn btn-secondary" onclick="FitnessSection.exportHistoryRange('csv')">⬇ CSV / Excel</button>
+               <button class="btn btn-primary" onclick="FitnessSection.exportHistoryRange('pdf')">🖨 Print / PDF</button>` });
+  }
+
+  function exportHistoryRange(kind) {
+    const from = document.getElementById('fhFrom')?.value;
+    const to = document.getElementById('fhTo')?.value;
+    if (!from || !to) { Toast.show('Pick both dates', 'warning'); return; }
+    if (from > to) { Toast.show('"From" must be before "To"', 'warning'); return; }
+    Modal.close();
+    if (kind === 'csv') exportHistoryCSV(from, to); else printHistory(from, to);
+  }
+
+  function _rangeRecords(fromIso, toIso) {
+    const inR = x => x.date && x.date >= fromIso && x.date <= toIso;
+    return {
+      workouts: (AppState.fitness || []).filter(inR).sort((a, b) => a.date.localeCompare(b.date)),
+      metrics: (AppState.bodyMetrics || []).filter(inR).sort((a, b) => a.date.localeCompare(b.date)),
+    };
+  }
+
+  function printHistory(fromIso, toIso) {
+    const { workouts, metrics } = _rangeRecords(fromIso, toIso);
+    if (!workouts.length && !metrics.length) { Toast.show('Nothing logged in that period', 'info'); return; }
+    const w = window.open('', '_blank');
+    if (!w) { Toast.show('Pop-up blocked — allow pop-ups to print', 'warning'); return; }
+    const feelTxt = f => f && FEELS[f] ? `${FEELS[f]} ${f}` : '';
+    w.document.write(`<!DOCTYPE html><html><head><title>Fitness History — ${fromIso} to ${toIso}</title>
+      <style>
+        body{font-family:Arial,sans-serif;margin:32px;color:#1E1B4B;}
+        h1{font-size:20px;margin-bottom:4px;}
+        h2{font-size:15px;margin:28px 0 4px;color:#4F46E5;border-bottom:2px solid #E0E7FF;padding-bottom:6px;}
+        p{font-size:13px;color:#555;margin-top:4px;}
+        table{border-collapse:collapse;width:100%;margin-top:12px;}
+        th,td{border:1px solid #ddd;padding:10px 12px;font-size:13px;text-align:left;vertical-align:top;line-height:1.5;}
+        th{background:#EEF2FF;color:#312E81;font-size:12px;text-transform:uppercase;letter-spacing:0.04em;}
+        tr:nth-child(even) td{background:#F8FAFC;}
+        td.num{text-align:right;white-space:nowrap;}
+        .muted{color:#94A3B8;}
+      </style></head><body>
+      <h1>💪 Fitness History — ${Helpers.formatDateShort(fromIso)} to ${Helpers.formatDateShort(toIso)}</h1>
+      <p>Generated ${new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })}.</p>
+      <h2>Workouts</h2>
+      ${workouts.length ? `<table><tr><th>Date</th><th>Type</th><th>Duration</th><th>Feeling</th><th>Exercises</th><th>Notes</th></tr>
+        ${workouts.map(x => `<tr><td>${Helpers.formatDateShort(x.date)}</td><td>${x.rest ? '😴 Rest day' : escHtml(x.type || '')}</td><td class="num">${x.rest ? '<span class="muted">—</span>' : (x.duration || 0) + ' min'}</td><td>${feelTxt(x.feel) || '<span class="muted">—</span>'}</td><td>${(x.exercises || []).length ? x.exercises.map(e => `${escHtml(e.name)} ${e.sets}×${e.reps}${e.weight ? ' @ ' + e.weight + 'kg' : ''}`).join('<br>') : '<span class="muted">—</span>'}</td><td>${escHtml(x.notes || '') || '<span class="muted">—</span>'}</td></tr>`).join('')}</table>` : '<p>No workouts in this period.</p>'}
+      <h2>Body Metrics</h2>
+      ${metrics.length ? `<table><tr><th>Date</th><th>Metric</th><th>Value</th></tr>
+        ${metrics.map(m => `<tr><td>${Helpers.formatDateShort(m.date)}</td><td>${m.kind === 'height' ? '📏 Height' : '⚖️ Weight'}</td><td class="num">${(m.kind === 'height' ? m.height : m.weight)} ${m.unit || 'kg'}</td></tr>`).join('')}</table>` : '<p>No body metrics in this period.</p>'}
+      </body></html>`);
+    w.document.close(); w.focus();
+    setTimeout(() => w.print(), 300);
+  }
+
+  function exportHistoryCSV(fromIso, toIso) {
+    const { workouts, metrics } = _rangeRecords(fromIso, toIso);
+    if (!workouts.length && !metrics.length) { Toast.show('Nothing logged in that period', 'info'); return; }
+    const rows = [[`FITNESS HISTORY ${fromIso} to ${toIso}`], [], ['WORKOUTS'],
+      ['Date', 'Type', 'Duration (min)', 'Feeling', 'Exercises', 'Notes'],
+      ...workouts.map(x => [x.date, x.rest ? 'Rest day' : (x.type || ''), x.rest ? 0 : (x.duration || 0), x.feel || '',
+        (x.exercises || []).map(e => `${e.name} ${e.sets}x${e.reps}${e.weight ? '@' + e.weight + 'kg' : ''}`).join('; '), x.notes || '']),
+      [], ['BODY METRICS'], ['Date', 'Metric', 'Value', 'Unit'],
+      ...metrics.map(m => [m.date, m.kind === 'height' ? 'Height' : 'Weight', (m.kind === 'height' ? m.height : m.weight) ?? '', m.unit || 'kg'])];
+    const text = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8;' }); // BOM keeps accents intact in Excel
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `fitness_history_${fromIso}_to_${toIso}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 500);
+    Toast.show('Fitness history downloaded ⬇', 'success');
+  }
+
   // Shared workout form (add + edit)
   function _workoutForm(w = {}) {
     return `
       <div class="grid-2">
         <div class="form-group"><label class="form-label">Type *</label>
           <select class="select" id="wType">
-            ${['Running','Walking','Cycling','Swimming','Weight Training','HIIT','Yoga','Other'].map(t => `<option ${w.type === t ? 'selected' : ''}>${t}</option>`).join('')}
+            ${w.type && !['Running','Walking','Cycling','Swimming','Weight Training','HIIT','Yoga','Other','Freestyle'].includes(w.type) ? `<option selected>${escHtml(w.type)}</option>` : ''}
+            ${['Running','Walking','Cycling','Swimming','Weight Training','HIIT','Yoga','Other','Freestyle'].map(t => `<option ${w.type === t ? 'selected' : ''}>${t}</option>`).join('')}
           </select>
         </div>
         <div class="form-group"><label class="form-label">Muscle Group</label>
@@ -11710,6 +12121,7 @@ const FitnessSection = (() => {
           <input class="input" type="date" id="wDate" value="${w.date || Helpers.today()}" />
         </div>
       </div>
+      ${_feelRow(w.feel || null)}
       <div class="form-group"><label class="form-label">Notes</label>
         <textarea class="textarea" id="wNotes" rows="2" placeholder="Sets, reps, how it felt...">${escHtml(w.notes || '')}</textarea>
       </div>`;
@@ -11721,6 +12133,7 @@ const FitnessSection = (() => {
   // "📋 Copy a past workout" to save typing. Used by + Log Workout, ✏️ edit,
   // and the Exercise Guide — the old 2-path logging is gone.
   let _builderExercises = [];
+  let _currentRoutineId = null; // v33: set when the builder was opened from a routine
 
   function _exerciseSuggestions() {
     const past = [];
@@ -11731,6 +12144,8 @@ const FitnessSection = (() => {
   function openBuilder(id, prefill) {
     const w = id ? (AppState.fitness || []).find(x => x.id === id) : null;
     const base = w || prefill || {};
+    _currentRoutineId = (prefill && prefill._routineId) || null;
+    _logFeel = base.feel || null; // v34: feel row inside the builder form
     _builderExercises = (base.exercises || []).map(e => ({ ...e }));
     if (prefill && prefill.addExercise) _builderExercises.push({ name: prefill.addExercise, sets: 3, reps: 10, weight: '' });
     Modal.open({ title: w ? '✏️ Edit Workout' : '💪 Workout Builder', wide: true, body: `
@@ -11792,15 +12207,21 @@ const FitnessSection = (() => {
       date: document.getElementById('wDate')?.value || Helpers.today(),
       notes: document.getElementById('wNotes')?.value.trim(),
       exercises: _builderExercises.map(e => ({ ...e })),
+      feel: _logFeel,
     };
     const w = id ? (AppState.fitness || []).find(x => x.id === id) : null;
     if (w) { Object.assign(w, vals); Toast.show('Workout updated ✅', 'success'); }
     else {
-      AppState.fitness.push({ id: Helpers.uuid(), ...vals, createdAt: new Date().toISOString() });
+      AppState.fitness.push({ id: Helpers.uuid(), ...vals,
+        ...(_currentRoutineId ? { routineId: _currentRoutineId } : {}), // v33: heatmap shows the routine name
+        createdAt: new Date().toISOString() });
       Toast.show(`Workout logged 💪${vals.exercises.length ? ` — ${vals.exercises.length} exercise${vals.exercises.length === 1 ? '' : 's'}` : ''}`, 'success');
     }
     _builderExercises = [];
+    _currentRoutineId = null;
+    _logFeel = null;
     saveState(); Modal.close(); render();
+    _reopenEntriesIfNeeded(); // edited from the Entries view → go back to it
   }
 
   // 📋 Copy a past workout → builder prefilled with its whole routine, dated today
@@ -11883,6 +12304,7 @@ const FitnessSection = (() => {
   }
 
   function openAddMetric() {
+    _entriesTab = null; // opened from the header, not the Entries view
     Modal.open({ title: '📏 Log Body Metric', body: _metricForm(),
       footer: `<button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
                <button class="btn btn-primary" onclick="FitnessSection.submitMetric()">Save →</button>`
@@ -11915,20 +12337,19 @@ const FitnessSection = (() => {
     m.unit = vals.unit; m.date = vals.date;
     saveState(); Modal.close(); render();
     Toast.show('Metric updated ✅', 'success');
+    _reopenEntriesIfNeeded(); // list + trend chart refresh with the new value
   }
 
   async function deleteWorkout(id) {
     const ok = await Modal.confirm({ title:'Delete Workout', message:'Delete this workout log?', confirmText:'Delete', danger:true });
-    if (!ok) return;
-    AppState.fitness = AppState.fitness.filter(w => w.id !== id);
-    saveState(); render();
+    if (ok) { AppState.fitness = AppState.fitness.filter(w => w.id !== id); saveState(); render(); }
+    _reopenEntriesIfNeeded(); // the confirm dialog replaced the Entries modal — restore it
   }
 
   async function deleteMetric(id) {
     const ok = await Modal.confirm({ title:'Delete Metric', message:'Delete this body metric entry?', confirmText:'Delete', danger:true });
-    if (!ok) return;
-    AppState.bodyMetrics = AppState.bodyMetrics.filter(m => m.id !== id);
-    saveState(); render();
+    if (ok) { AppState.bodyMetrics = AppState.bodyMetrics.filter(m => m.id !== id); saveState(); render(); }
+    _reopenEntriesIfNeeded(); // trend chart re-renders with the entry removed
   }
 
   function openMuscleGuide() {
@@ -11965,9 +12386,18 @@ const FitnessSection = (() => {
     openBuilder(null, { type: 'Weight Training', muscleGroup: ['Cardio', 'Full Body'].includes(group) ? '' : group, addExercise: name });
   }
 
-  return { render, setView, openAddWorkout, openEditWorkout,
-           openBuilder, submitBuilder, addBuilderExercise, removeBuilderExercise,
-           openCopyPast, applyCopyPast, inlineEditExercise,
+  return { render,
+           // v34 logging
+           openLogPicker, openLogForm, submitLogForm, logRestDay, setLogFeel,
+           // v34 routines
+           openManageRoutines, openRoutineForm, submitRoutineForm, deleteRoutine,
+           routineTypeChanged, routineMuscleChanged, toggleRoutineExercise,
+           addRoutineCustomExercise, updateRoutineEx, removeRoutineEx,
+           // v34 entries + export
+           openEntriesView, closeEntries, openExportPanel, exportHistoryRange, exportHistoryCSV, printHistory,
+           // builder (workout edit) + metrics + guide
+           openAddWorkout, openEditWorkout, openBuilder, submitBuilder,
+           addBuilderExercise, removeBuilderExercise, openCopyPast, applyCopyPast, inlineEditExercise,
            openAddMetric, submitMetric, openEditMetric, submitEditMetric,
            deleteWorkout, deleteMetric, openMuscleGuide, updateMuscleGuide, quickLogExercise };
 })();
@@ -12310,7 +12740,7 @@ const MedicationSection = (() => {
       [], ['EFFECTS JOURNAL'], ['Date', 'Medication', 'Observation'],
       ...effects.map(e => [e.date, e.med, e.text])];
     const text = csv.map(r => r.map(v => `"${String(v == null ? '' : v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
-    const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8;' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `medication_history_${fromIso}_to_${toIso}.csv`;
@@ -13399,68 +13829,84 @@ const FocusSection = (() => {
   }
 
   function _playAlarm(kind) {
-    // Two rings of three beeps (~2.5s) — one short ring was easy to miss.
+    // v35: three distinct rings of three beeps (~5s), louder gain — an alarm
+    // you can miss isn't an alarm.
     try {
       const ctx = new (window.AudioContext||window.webkitAudioContext)();
       if (ctx.state === 'suspended') ctx.resume();
       const freq = kind === 'break' ? 660 : 880;
-      [0, 300, 600, 1300, 1600, 1900].forEach(delay => {
+      [0, 280, 560, 1500, 1780, 2060, 3000, 3280, 3560].forEach(delay => {
         const osc = ctx.createOscillator(); const gain = ctx.createGain();
         osc.connect(gain); gain.connect(ctx.destination);
         osc.frequency.value = freq; osc.type = 'sine';
         const t = ctx.currentTime + delay/1000;
-        gain.gain.setValueAtTime(0.3, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
-        osc.start(t); osc.stop(t + 0.6);
+        gain.gain.setValueAtTime(0.85, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+        osc.start(t); osc.stop(t + 0.55);
       });
       // Browsers cap concurrent AudioContexts; release this one once it's done.
-      setTimeout(() => { try { ctx.close(); } catch(e) {} }, 4000);
+      setTimeout(() => { try { ctx.close(); } catch(e) {} }, 5500);
     } catch(e) {}
+  }
+
+  // v35: the countdown is anchored to a WALL-CLOCK end time, not tick counting.
+  // Backgrounded/locked devices throttle setInterval — on wake, the next tick
+  // (or the visibilitychange handler below) snaps straight to the true time.
+  let _endAt = null;
+
+  function _timerTick() {
+    if (!isRunning || !_endAt) return;
+    remaining = Math.max(0, Math.round((_endAt - Date.now()) / 1000));
+    updateDisplay();
+    if (remaining <= 0) _complete();
+  }
+
+  function _complete() {
+    clearInterval(_timer); _timer = null;
+    isRunning = false; _endAt = null;
+    if (!isBreak) {
+      _playAlarm('focus');
+      logSession(true);
+      isBreak   = true;
+      remaining = breakMins * 60;
+      total     = breakMins * 60;
+      _notify('🎉 Focus session complete!', `Great work! ${workMins} min session done. Time for a ${breakMins}-min break.`);
+    } else {
+      _playAlarm('break');
+      isBreak   = false;
+      remaining = workMins * 60;
+      total     = workMins * 60;
+      _notify('⏰ Break over', 'Break finished — ready to focus again?');
+    }
+    document.getElementById('focusStartBtn').textContent = '▶ Start';
+    updateDisplay();
   }
 
   function start() {
     isRunning    = true;
     sessionStart = new Date();
+    _endAt       = Date.now() + remaining * 1000;
     // Request notification permission proactively when the user starts a session
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission();
     }
     document.getElementById('focusStartBtn').textContent = '⏸ Pause';
-    _timer = setInterval(() => {
-      remaining--;
-      updateDisplay();
-      if (remaining <= 0) {
-        clearInterval(_timer); _timer = null;
-        isRunning = false;
-        if (!isBreak) {
-          _playAlarm('focus');
-          logSession(true);
-          isBreak   = true;
-          remaining = breakMins * 60;
-          total     = breakMins * 60;
-          _notify('🎉 Focus session complete!', `Great work! ${workMins} min session done. Time for a ${breakMins}-min break.`);
-        } else {
-          _playAlarm('break');
-          isBreak   = false;
-          remaining = workMins * 60;
-          total     = workMins * 60;
-          _notify('⏰ Break over', 'Break finished — ready to focus again?');
-        }
-        document.getElementById('focusStartBtn').textContent = '▶ Start';
-        updateDisplay();
-      }
-    }, 1000);
+    _timer = setInterval(_timerTick, 1000);
   }
 
+  // On unlock / tab return: snap to the correct time immediately
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) _timerTick(); });
+
   function pause() {
+    _timerTick(); // capture the true remaining before stopping
     clearInterval(_timer); _timer = null;
-    isRunning = false;
+    isRunning = false; _endAt = null;
     document.getElementById('focusStartBtn').textContent = '▶ Resume';
   }
 
   function reset() {
     clearInterval(_timer); _timer = null;
-    isRunning = false; isBreak = false;
+    isRunning = false; isBreak = false; _endAt = null;
     remaining = workMins * 60; total = workMins * 60;
     document.getElementById('focusStartBtn').textContent = '▶ Start';
     updateDisplay();
@@ -13961,6 +14407,11 @@ document.addEventListener('DOMContentLoaded', () => {
     Dashboard.render();
     // Monthly backup reminder (mandatory popup after 30+ days without a backup)
     BackupReminder.check();
+    // v35: one-time notification-permission ask (skipped if a modal is already up)
+    setTimeout(() => {
+      const overlayBusy = document.querySelector('.modal-overlay.active, #modalOverlay.active');
+      if (!overlayBusy) { try { AppNotify.promptPermission(); } catch(e) {} }
+    }, 2500);
   }
 
   // Update header date
