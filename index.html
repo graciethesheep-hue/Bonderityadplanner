@@ -4061,10 +4061,16 @@
         <div class="settings-group-header">
           <div class="settings-group-title">🔔 Notifications</div>
         </div>
+        <!-- v37: honest, ADHD-friendly expectations — push stays ON for Android/Chrome -->
+        <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-3);font-size:var(--text-xs);color:var(--text-secondary);line-height:1.7;">
+          💬 <strong style="color:var(--text-primary);">In-app reminders</strong> (the little pop-ups inside the planner) work on <strong>every device</strong>, always.<br>
+          📱 <strong style="color:var(--text-primary);">System banners</strong> (on your lock screen / over other apps) work on <strong>Android and Chrome-type browsers</strong>.<br>
+          🍎 On <strong style="color:var(--text-primary);">iPhone &amp; Mac</strong>, Apple's security rules limit banners — they may only show while the app is open. That's the platform, not you, and nothing is broken. 💜 Tip: open the app when your day starts — the built-in <strong>Catch-Up system</strong> instantly replays anything you missed.
+        </div>
         <div class="settings-row">
           <div>
             <div class="settings-row-label">Desktop / mobile notifications</div>
-            <div class="settings-row-sub">Also show reminders as system notifications outside the app (asks your browser for permission).</div>
+            <div class="settings-row-sub">Also show reminders as system banners outside the app (asks your device for permission when you turn it on).</div>
           </div>
           <input type="checkbox" id="notifDesktop" style="width:20px;height:20px;cursor:pointer;accent-color:var(--accent-primary);" onchange="AppNotify.setDesktop(this.checked)" />
         </div>
