@@ -9938,13 +9938,35 @@ const AppNotify = (() => {
 
   function enabled(cat) { return prefs()[cat] !== false; }
 
-  // One reminder = in-app toast + (if turned on) a desktop/mobile system notification
+  // v36 (Spark mechanism): system notifications go through the SERVICE WORKER
+  // first — page-scoped `new Notification` is silently dropped by browsers
+  // when the tab is backgrounded or the device is locked, which is exactly
+  // when reminders matter most. SW notifications show over other apps and on
+  // the lock screen (Android Chrome / desktop Chrome); `new Notification` is
+  // only the fallback for disk-opened/no-SW contexts.
+  function _system(title, body, tag) {
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    const opts = {
+      body: String(body).replace(/<[^>]*>/g, ''),
+      tag: tag || 'adhd-planner',          // replaces the previous alert of the same kind
+      icon: 'icon-192.png',
+      badge: 'icon-192.png',
+      vibrate: [200, 100, 200],
+    };
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.ready
+        .then(reg => reg.showNotification(title, opts))
+        .catch(() => { try { new Notification(title, opts); } catch(e) {} });
+    } else {
+      try { new Notification(title, opts); } catch(e) {}
+    }
+  }
+
+  // One reminder = in-app toast + (if turned on) a system notification
   function notify(cat, msg, ms) {
     if (!enabled(cat)) return false;
     Toast.show(msg, 'info', ms || 8000);
-    if (prefs().desktop && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      try { new Notification('ADHD Life Planner', { body: String(msg).replace(/<[^>]*>/g, '') }); } catch(e) { /* not supported */ }
-    }
+    if (prefs().desktop) _system('ADHD Life Planner', msg, 'adhd-' + cat);
     return true;
   }
 
@@ -10052,7 +10074,7 @@ const AppNotify = (() => {
                <button class="btn btn-primary" onclick="localStorage.setItem('adhd_planner_notifAsked','1'); Modal.close(); AppNotify.setDesktop(true);">🔔 Turn on</button>` });
   }
 
-  return { notify, enabled, prefs, setCategory, setDesktop, promptPermission, CATEGORIES };
+  return { notify, system: _system, enabled, prefs, setCategory, setDesktop, promptPermission, CATEGORIES };
 })();
 
 // ════════════════════════════════════════════════════════════════
@@ -13814,26 +13836,45 @@ const FocusSection = (() => {
   function _notify(title, body) {
     // Toast always shown regardless of notification permission
     Toast.show(body, 'success', 5000);
-    // Browser notification if permitted
+    // v36: system notification via the service worker (Spark mechanism) —
+    // fires on the lock screen / over other apps, unlike page-scoped
+    // `new Notification` which browsers drop for backgrounded tabs
+    try { AppNotify.system(title, body, 'adhd-focus-timer'); } catch(e) {}
+  }
+
+  // v36 (Spark mechanism): ONE persistent AudioContext, created & resumed
+  // inside the Start-button click. iOS/Mac Safari only unlock audio during a
+  // user gesture — a context created at alarm time stays suspended = silence.
+  let _alarmCtx = null;
+  function _ensureAudio() {
     try {
-      if ('Notification' in window) {
-        if (Notification.permission === 'granted') {
-          new Notification(title, { body, icon: '' });
-        } else if (Notification.permission !== 'denied') {
-          Notification.requestPermission().then(p => {
-            if (p === 'granted') new Notification(title, { body });
-          });
-        }
-      }
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!_alarmCtx) _alarmCtx = new Ctx();
+      if (_alarmCtx.state === 'suspended') _alarmCtx.resume();
     } catch(e) {}
   }
 
+  // v36 (Spark mechanism): keep the screen awake while a timer runs —
+  // best-effort, unsupported browsers just no-op
+  let _wakeLock = null;
+  async function _acquireWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try { _wakeLock = await navigator.wakeLock.request('screen'); } catch(e) { _wakeLock = null; }
+  }
+  function _releaseWakeLock() {
+    if (_wakeLock) { _wakeLock.release().catch(() => {}); _wakeLock = null; }
+  }
+
   function _playAlarm(kind) {
-    // v35: three distinct rings of three beeps (~5s), louder gain — an alarm
-    // you can miss isn't an alarm.
+    // Three distinct rings of three beeps (~4.1s), loud gain, vibration per
+    // ring. v36: plays on the PERSISTENT context unlocked in start() — a
+    // fresh context here would be suspended on iOS/Mac Safari (no gesture)
+    // and produce total silence.
     try {
-      const ctx = new (window.AudioContext||window.webkitAudioContext)();
-      if (ctx.state === 'suspended') ctx.resume();
+      _ensureAudio();
+      const ctx = _alarmCtx;
+      if (!ctx) return;
       const freq = kind === 'break' ? 660 : 880;
       [0, 280, 560, 1500, 1780, 2060, 3000, 3280, 3560].forEach(delay => {
         const osc = ctx.createOscillator(); const gain = ctx.createGain();
@@ -13844,8 +13885,8 @@ const FocusSection = (() => {
         gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
         osc.start(t); osc.stop(t + 0.55);
       });
-      // Browsers cap concurrent AudioContexts; release this one once it's done.
-      setTimeout(() => { try { ctx.close(); } catch(e) {} }, 5500);
+      // Vibrate on each ring (no-op where unsupported, e.g. iOS Safari)
+      if (navigator.vibrate) [0, 1500, 3000].forEach(d => setTimeout(() => navigator.vibrate([200, 100, 200]), d));
     } catch(e) {}
   }
 
@@ -13864,6 +13905,7 @@ const FocusSection = (() => {
   function _complete() {
     clearInterval(_timer); _timer = null;
     isRunning = false; _endAt = null;
+    _releaseWakeLock();
     if (!isBreak) {
       _playAlarm('focus');
       logSession(true);
@@ -13886,6 +13928,8 @@ const FocusSection = (() => {
     isRunning    = true;
     sessionStart = new Date();
     _endAt       = Date.now() + remaining * 1000;
+    _ensureAudio();      // v36: unlock audio INSIDE the click — iOS/Mac requirement
+    _acquireWakeLock();  // v36: keep the screen on while the timer runs
     // Request notification permission proactively when the user starts a session
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission();
@@ -13894,19 +13938,27 @@ const FocusSection = (() => {
     _timer = setInterval(_timerTick, 1000);
   }
 
-  // On unlock / tab return: snap to the correct time immediately
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) _timerTick(); });
+  // On unlock / tab return: snap to the correct time immediately, and
+  // re-acquire the wake lock (the OS auto-releases it on hide)
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      _timerTick();
+      if (isRunning) _acquireWakeLock();
+    }
+  });
 
   function pause() {
     _timerTick(); // capture the true remaining before stopping
     clearInterval(_timer); _timer = null;
     isRunning = false; _endAt = null;
+    _releaseWakeLock();
     document.getElementById('focusStartBtn').textContent = '▶ Resume';
   }
 
   function reset() {
     clearInterval(_timer); _timer = null;
     isRunning = false; isBreak = false; _endAt = null;
+    _releaseWakeLock();
     remaining = workMins * 60; total = workMins * 60;
     document.getElementById('focusStartBtn').textContent = '▶ Start';
     updateDisplay();

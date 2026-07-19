@@ -1,7 +1,7 @@
 /* ADHD Life Planner — service worker
    Cache-first offline support for the app shell + CDN assets (Chart.js, fonts).
    Bump CACHE_VERSION whenever a new app version is deployed so clients update. */
-const CACHE_VERSION = 'adhd-planner-v35';
+const CACHE_VERSION = 'adhd-planner-v36';
 const SHELL = [
   './',
   './index.html',
@@ -26,6 +26,20 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then(keys => Promise.all(keys.filter(k => k !== CACHE_VERSION).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
+  );
+});
+
+// v36 (Spark mechanism): the page shows reminders via reg.showNotification()
+// so they appear even when the tab is backgrounded/locked; tapping one
+// focuses (or reopens) the planner.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+      const client = clients.find((c) => 'focus' in c);
+      if (client) return client.focus();
+      return self.clients.openWindow('./');
+    })
   );
 });
 
