@@ -1,9 +1,7 @@
 {
-  "name": "Bailey Life App",
-  "short_name": "Bailey Life App",
-  "lang": "es",
-  "dir": "ltr",
-  "description": "Un planificador de vida tranquilo: tareas, calendario, bloques de tiempo, hábitos, presupuesto y más. Tus datos se quedan en tu dispositivo.",
+  "name": "ADHD Life Planner",
+  "short_name": "ADHD Planner",
+  "description": "A shame-free life planner for adults with ADHD — tasks, calendar, time blocking, habits, budget, and more. Your data stays on your device.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
@@ -11,23 +9,8 @@
   "background_color": "#EEF2FF",
   "theme_color": "#6366F1",
   "icons": [
-    {
-      "src": "icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "icon-maskable-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
-    }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
